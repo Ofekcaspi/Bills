@@ -19,7 +19,7 @@ def get_gmail_service():
 
     # credentials.json חייב להיות בתיקייה שבה אתה מריץ את הסקריפט
     flow = InstalledAppFlow.from_client_secrets_file(
-        "credentials.json", SCOPES
+        "../backend/credentials.json", SCOPES
     )
 
     # זה פותח דפדפן עם מסך התחברות של גוגל

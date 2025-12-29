@@ -1,6 +1,5 @@
 from __future__ import print_function
 import os.path
-
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -24,10 +23,10 @@ def get_gmail_service():
         else:
             # פעם ראשונה: יפתח דפדפן לבקשת הרשאה
             flow = InstalledAppFlow.from_client_secrets_file(
-                'credentials.json', SCOPES)
+                '../backend/credentials.json', SCOPES)
             creds = flow.run_local_server(port=0)
         # נשמור token לשימושים הבאים
-        with open('../token.json', 'w') as token:
+        with open('../backend/token.json', 'w') as token:
             token.write(creds.to_json())
 
     # יצירת אובייקט service ל-Gmail
