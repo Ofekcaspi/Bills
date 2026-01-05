@@ -23,10 +23,10 @@ def get_gmail_service():
         else:
             # פעם ראשונה: יפתח דפדפן לבקשת הרשאה
             flow = InstalledAppFlow.from_client_secrets_file(
-                '../backend/credentials.json', SCOPES)
+                '../old be/credentials.json', SCOPES)
             creds = flow.run_local_server(port=0)
         # נשמור token לשימושים הבאים
-        with open('../backend/token.json', 'w') as token:
+        with open('../old be/token.json', 'w') as token:
             token.write(creds.to_json())
 
     # יצירת אובייקט service ל-Gmail

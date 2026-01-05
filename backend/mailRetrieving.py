@@ -206,7 +206,7 @@ class MailRetrieving:
 
 def main():
     mr = MailRetrieving()
-    mr.connect(token_path="token.json", credentials_path="credentials.json")
+    mr.connect(token_path="../old be/token.json", credentials_path="../old be/credentials.json")
 
     TIME_WINDOW = "6m"  # last 6 months
     OUT_DIR = "invoices_last_6_months"

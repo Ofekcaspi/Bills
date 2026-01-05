@@ -220,7 +220,7 @@ class GmailInvoiceDownloader:
 
 def main():
     downloader = GmailInvoiceDownloader(
-        credentials_path="../backend/credentials.json",
+        credentials_path="../old be/credentials.json",
         download_root="downloads"
     )
     downloader.connect()

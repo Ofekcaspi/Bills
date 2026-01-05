@@ -1,6 +1,6 @@
 backend/node_modules
 frontend/bills/node_modules
 venv
-backend/credentials.json
-backend/token.json
+old be/credentials.json
+old be/token.json
 .idea
