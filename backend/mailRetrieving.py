@@ -1,18 +1,28 @@
+from __future__ import annotations
+
+import base64
+import os
+import re
+from pathlib import Path
+from typing import Optional, List, Dict
+
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 
-from email import message_from_bytes
-import base64
-import os
-import re
+from sqlmodel import Session, select
+
+from models import Bill
 
 
 class MailRetrieving:
-    def __init__(self):
+    def __init__(self, session: Session, downloads_dir: Path):
         self.service = None
         self.scopes = ["https://www.googleapis.com/auth/gmail.readonly"]
+        self.session = session
+        self.downloads_dir = Path(downloads_dir)
+        self.downloads_dir.mkdir(parents=True, exist_ok=True)
 
     def connect(self, token_path="token.json", credentials_path="credentials.json"):
         creds = None
@@ -38,13 +48,13 @@ class MailRetrieving:
 
         self.service = build("gmail", "v1", credentials=creds)
 
+    # ---------- helpers ----------
     def _safe_filename(self, name: str) -> str:
         name = (name or "").strip()
         name = re.sub(r"[\\/:*?\"<>|]+", "_", name)  # Windows-safe
         return name[:180] if len(name) > 180 else name
 
     def _iter_parts(self, payload: dict):
-        """Iterate recursively over all MIME parts."""
         stack = [payload]
         while stack:
             node = stack.pop()
@@ -54,20 +64,16 @@ class MailRetrieving:
                 if p.get("parts"):
                     stack.append(p)
 
-    def _list_all_message_ids(self, query: str, user_id="me"):
-        """Pagination: returns ALL message ids matching query."""
+    def _list_all_message_ids(self, query: str, user_id="me") -> List[str]:
         if self.service is None:
             raise RuntimeError("Call connect() first")
 
-        ids = []
+        ids: List[str] = []
         page_token = None
 
         while True:
             res = self.service.users().messages().list(
-                userId=user_id,
-                q=query,
-                maxResults=500,
-                pageToken=page_token
+                userId=user_id, q=query, maxResults=500, pageToken=page_token
             ).execute()
 
             msgs = res.get("messages", []) or []
@@ -79,26 +85,43 @@ class MailRetrieving:
 
         return ids
 
-    def build_receipts_query(self, time_window=None):
+    def _headers_map(self, payload: dict) -> Dict[str, str]:
+        headers = payload.get("headers", []) or []
+        return {h.get("name", "").lower(): h.get("value", "") for h in headers if h.get("name")}
+
+    def build_receipts_query(self, time_window: Optional[str] = None) -> str:
         base_query = (
-            f'has:attachment '
-            f'(subject:חשבונית OR subject:קבלה OR subject:invoice OR subject:receipt OR '
-            f'"  OR החשבון  חשבונית מס" OR "Tax Invoice" OR "Receipt")'
+            'has:attachment '
+            '(subject:חשבונית OR subject:קבלה OR subject:invoice OR subject:receipt OR '
+            '"Tax Invoice" OR "Receipt")'
         )
         if time_window:
             base_query = f"{base_query} newer_than:{time_window}"
         return base_query
 
-    def download_all_receipt_attachments(
+    def _infer_category(self, subject: str) -> str:
+        s = (subject or "").lower()
+        if "receipt" in s or "קבלה" in s:
+            return "receipt"
+        if "invoice" in s or "חשבונית" in s or "tax invoice" in s:
+            return "invoice"
+        return "unknown"
+
+    def _bill_exists(self, message_id: str, filename: str) -> bool:
+        stmt = select(Bill.id).where(Bill.message_id == message_id, Bill.filename == filename)
+        return self.session.exec(stmt).first() is not None
+
+    # ---------- main ----------
+    def pull_bills_to_db(
             self,
-            time_window="6m",
-            out_dir="downloads_invoices",
-            user_id="me",
-            only_pdf_and_images=True
-    ):
+            time_window: str = "6m",
+            user_id: str = "me",
+            only_pdf_and_images: bool = True,
+    ) -> dict:
         """
-        מוריד את כל המצורפים מכל מיילי החשבוניות בחלון הזמן הנתון.
-        מחזיר סיכום: (emails_found, emails_with_files, files_downloaded, out_dir)
+        For every matching email attachment:
+        1) download file into downloads/<message_id>/<filename>
+        2) insert a Bill row into bills table (one row per file)
         """
         if self.service is None:
             raise RuntimeError("Call connect() first")
@@ -106,40 +129,46 @@ class MailRetrieving:
         query = self.build_receipts_query(time_window=time_window)
         message_ids = self._list_all_message_ids(query=query, user_id=user_id)
 
-        os.makedirs(out_dir, exist_ok=True)
-
         emails_with_files = 0
-        files_downloaded = 0
+        files_saved = 0
+        rows_inserted = 0
 
         for idx, mid in enumerate(message_ids, start=1):
-            # Fetch full message to access attachment metadata (parts + attachmentId)
             msg = self.service.users().messages().get(
-                userId=user_id,
-                id=mid,
-                format="full"
+                userId=user_id, id=mid, format="full"
             ).execute()
 
             payload = msg.get("payload", {}) or {}
+            headers = self._headers_map(payload)
+            subject = headers.get("subject", "")
+            sender = headers.get("from", "")
+            msg_date = headers.get("date", "")
+
+            category = self._infer_category(subject)
+
             found_any_in_email = False
 
             for part in self._iter_parts(payload):
                 filename = part.get("filename") or ""
                 body = part.get("body", {}) or {}
                 attachment_id = body.get("attachmentId")
+                mime_type = part.get("mimeType") or ""
 
                 if not filename or not attachment_id:
                     continue
 
                 filename_lower = filename.lower()
-                if only_pdf_and_images:
-                    if not filename_lower.endswith((".pdf", ".png", ".jpg", ".jpeg")):
-                        continue
+                if only_pdf_and_images and not filename_lower.endswith((".pdf", ".png", ".jpg", ".jpeg")):
+                    continue
 
-                # Download attachment bytes
+                safe_name = self._safe_filename(filename)
+
+                # Dedup: same email + same filename
+                if self._bill_exists(mid, safe_name):
+                    continue
+
                 att = self.service.users().messages().attachments().get(
-                    userId=user_id,
-                    messageId=mid,
-                    id=attachment_id
+                    userId=user_id, messageId=mid, id=attachment_id
                 ).execute()
 
                 data = att.get("data")
@@ -148,82 +177,47 @@ class MailRetrieving:
 
                 file_bytes = base64.urlsafe_b64decode(data.encode("utf-8"))
 
-                # Save under a folder per message_id
-                msg_dir = os.path.join(out_dir, mid)
-                os.makedirs(msg_dir, exist_ok=True)
+                # Save file under downloads/<message_id>/<filename>
+                msg_dir = self.downloads_dir / mid
+                msg_dir.mkdir(parents=True, exist_ok=True)
 
-                out_path = os.path.join(msg_dir, self._safe_filename(filename))
-                with open(out_path, "wb") as f:
-                    f.write(file_bytes)
+                out_path = msg_dir / safe_name
+                out_path.write_bytes(file_bytes)
+
+                # saved_path should be relative to downloads/ for /files/{relative_path}
+                saved_path = out_path.relative_to(self.downloads_dir).as_posix()
+
+                # Insert Bill row
+                bill = Bill(
+                    message_id=mid,
+                    attachment_id=attachment_id,
+                    subject=subject,
+                    sender=sender,
+                    msg_date=msg_date,
+                    filename=safe_name,
+                    mime_type=mime_type,
+                    saved_path=saved_path,
+                    category=category,
+                )
+                self.session.add(bill)
 
                 found_any_in_email = True
-                files_downloaded += 1
+                files_saved += 1
+                rows_inserted += 1
 
             if found_any_in_email:
                 emails_with_files += 1
 
-            # progress every 25
+            # commit every email (simple + safe)
+            self.session.commit()
+
             if idx % 25 == 0:
-                print(f"Progress: {idx}/{len(message_ids)} | files downloaded: {files_downloaded}")
+                print(f"Progress: {idx}/{len(message_ids)} | rows inserted: {rows_inserted} | files saved: {files_saved}")
 
-        return len(message_ids), emails_with_files, files_downloaded, os.path.abspath(out_dir)
-
-    # optional: keep your previous raw-email fetch
-    def get_emails(self, query=None, time_window=None, max_results=10, user_id="me"):
-        if self.service is None:
-            raise RuntimeError("Call connect() first")
-
-        if query is None:
-            query = self.build_receipts_query(time_window=time_window)
-        elif time_window:
-            query = f"{query} newer_than:{time_window}"
-
-        res = self.service.users().messages().list(
-            userId=user_id,
-            q=query,
-            maxResults=max_results
-        ).execute()
-
-        msgs = res.get("messages", []) or []
-        emails = []
-
-        for m in msgs:
-            data = self.service.users().messages().get(
-                userId=user_id,
-                id=m["id"],
-                format="raw"
-            ).execute()
-
-            raw = data.get("raw")
-            if not raw:
-                continue
-
-            decoded = base64.urlsafe_b64decode(raw.encode("utf-8"))
-            emails.append(message_from_bytes(decoded))
-
-        return emails
-
-
-def main():
-    mr = MailRetrieving()
-    mr.connect(token_path="../old be/token.json", credentials_path="../old be/credentials.json")
-
-    TIME_WINDOW = "6m"  # last 6 months
-    OUT_DIR = "invoices_last_6_months"
-
-    print(f"Downloading all receipt attachments for last {TIME_WINDOW}...")
-    emails_found, emails_with_files, files_downloaded, folder = mr.download_all_receipt_attachments(
-        time_window=TIME_WINDOW,
-        out_dir=OUT_DIR,
-        only_pdf_and_images=True
-    )
-
-    print("\n=== SUMMARY ===")
-    print(f"Emails matched query   : {emails_found}")
-    print(f"Emails with files      : {emails_with_files}")
-    print(f"Files downloaded       : {files_downloaded}")
-    print(f"Saved to folder        : {folder}")
-
-
-if __name__ == "__main__":
-    main()
+        return {
+            "emails_matched": len(message_ids),
+            "emails_with_files": emails_with_files,
+            "files_saved": files_saved,
+            "rows_inserted": rows_inserted,
+            "downloads_dir": str(self.downloads_dir.resolve()),
+        }
