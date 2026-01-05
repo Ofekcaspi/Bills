@@ -1,42 +1,137 @@
-#root {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
+:root{
+  --bg:#f6f7fb;
+  --card:#ffffff;
+  --border:#e7eaf0;
+  --text:#0f172a;
+  --muted:#64748b;
+  --shadow: 0 8px 20px rgba(15,23,42,.06);
+  --radius: 18px;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: filter 300ms;
+*{ box-sizing:border-box; }
+body{ margin:0; font-family: system-ui, Arial; background: var(--bg); color: var(--text); }
+
+.page{ min-height:100vh; }
+.container{ max-width: 1150px; margin: 0 auto; padding: 0 16px; }
+
+.topbar{
+  position: sticky; top:0; z-index: 10;
+  background: rgba(255,255,255,.85);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border);
 }
-.logo:hover {
-  filter: drop-shadow(0 0 2em #646cffaa);
+.topbarInner{ display:flex; align-items:center; justify-content:space-between; padding: 14px 0; gap: 12px; }
+.title{ font-weight: 800; font-size: 20px; }
+.subtitle{ color: var(--muted); font-size: 12px; margin-top: 2px; }
+.chip{
+  border:1px solid var(--border);
+  background: #fff;
+  padding: 8px 10px;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  box-shadow: var(--shadow);
 }
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafbaa);
+.mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+
+.main{ padding: 18px 0 40px; display:flex; flex-direction:column; gap: 14px; }
+
+.card{
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 14px;
 }
 
-@keyframes logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+.center{ text-align:center; padding: 28px; color: var(--muted); }
+
+.grid3{
+  display:grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+@media (max-width: 900px){
+  .grid3{ grid-template-columns: 1fr; }
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  a:nth-of-type(2) .logo {
-    animation: logo-spin infinite 20s linear;
-  }
+.kpi{
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 14px;
 }
+.kpiLabel{ color: var(--muted); font-size: 12px; }
+.kpiValue{ font-size: 26px; font-weight: 800; margin-top: 6px; }
 
-.card {
-  padding: 2em;
+.filters{
+  display:flex; align-items:center; justify-content:space-between;
+  gap: 10px;
 }
+.filtersLeft{ display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
+.filtersRight{ color: var(--muted); font-size: 13px; }
 
-.read-the-docs {
-  color: #888;
+.input, .select{
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: #fff;
+  outline: none;
+  min-width: 220px;
 }
+.input:focus, .select:focus{ border-color: #cbd5e1; box-shadow: 0 0 0 4px rgba(148,163,184,.25); }
+
+.btn{
+  border: 1px solid var(--border);
+  background: #fff;
+  padding: 10px 14px;
+  border-radius: 12px;
+  cursor: pointer;
+}
+.btn:hover{ background: #f8fafc; }
+
+.tableCard{ padding: 0; overflow:hidden; }
+.tableHeader{
+  display:flex; align-items:baseline; justify-content:space-between;
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.tableTitle{ font-weight: 800; }
+.tableHint{ color: var(--muted); font-size: 12px; }
+
+.tableWrap{ overflow:auto; }
+.table{ width:100%; border-collapse: collapse; font-size: 13px; }
+.table thead th{
+  text-align:right;
+  background: #f8fafc;
+  color: var(--muted);
+  font-weight: 700;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.table tbody td{
+  padding: 12px 14px;
+  border-bottom: 1px solid #f1f5f9;
+}
+.table tbody tr:hover{ background:#f8fafc; }
+.rowWarn{ background: rgba(245, 158, 11, .08); }
+
+.nowrap{ white-space: nowrap; }
+.truncate{ max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.linkBtn{
+  display:inline-block;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: #0f172a;
+  color:#fff;
+  text-decoration:none;
+  font-weight:700;
+  font-size: 12px;
+}
+.linkBtn:hover{ background: #111827; }
+
+.errorTitle{ color:#b91c1c; font-weight:800; margin-bottom: 6px; }
+.errorText{ color:#334155; }
+.hint{ margin-top: 8px; color: var(--muted); font-size: 12px; }
