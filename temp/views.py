@@ -10,9 +10,9 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
 
-from .gmailConnect import GmailAuthService
-from .models import BillDocument
-from .gmail_fetcher import fetch_invoice_attachments
+from backend.Bills.Bills.gmailConnect import GmailAuthService
+from backend.Bills.Bills.models import BillDocument
+from backend.Bills.Bills.gmail_fetcher import fetch_invoice_attachments
 
 
 # =====================================================
