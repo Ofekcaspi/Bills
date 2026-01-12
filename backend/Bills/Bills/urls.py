@@ -16,9 +16,10 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path,include
-from .views import get_emails
+from .views import gmail_connect
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('get-emails/', get_emails),
+    # path('get-emails/', get_emails),
+    path('connect-email/',gmail_connect),
 ]

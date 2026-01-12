@@ -15,6 +15,12 @@ from pathlib import Path
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+GMAIL_CREDENTIALS_PATH = BASE_DIR / "credentials.json"
+GMAIL_TOKEN_PATH = BASE_DIR / "token.json"
+BILLS_DOWNLOADS_DIR = BASE_DIR / "downloads"
+
+# Must match exactly the URL you expose in Google Cloud Console OAuth redirect URIs:
+GMAIL_REDIRECT_URI = "http://127.0.0.1:8000/connect-email"
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
