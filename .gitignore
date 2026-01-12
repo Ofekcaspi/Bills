@@ -4,3 +4,5 @@ venv
 old be/credentials.json
 old be/token.json
 .idea
+backend/Bills/credentials.json
+backend/Bills/token.json
