@@ -60,3 +60,60 @@ def gmail_connect(request):
         {"ok": True, "status": "connected"},
         status=status.HTTP_200_OK,
     )
+
+@api_view(["GET"])
+def get_emails(request):
+    """
+    GET /api/gmail/get-emails/
+
+    This should be called AFTER /api/gmail/connect/ completed successfully.
+
+    Behavior:
+    - If not connected → 401 with hint to call /connect/
+    - If connected → fetch emails+attachments, classify+extract, save via Django ORM
+    """
+    auth = _auth_service()
+    creds = auth.ensure_valid_creds()
+    if not creds:
+        return Response(
+            {"ok": False, "error": "not_connected", "hint": "Call /api/gmail/connect/ first"},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    # Optional query overrides via URL params
+    query = request.GET.get("query") or GmailInvoiceService.build_default_query(
+        time_window=request.GET.get("window", "365d")
+    )
+
+    # Safety/perf knobs (optional)
+    max_per_page = int(request.GET.get("max_per_page", "100"))
+    limit_messages_raw = request.GET.get("limit_messages")
+    limit_messages = int(limit_messages_raw) if limit_messages_raw else None
+
+    service = GmailInvoiceService(
+        creds=creds,
+        config=GmailFetchConfig(
+            download_root=settings.BILLS_DOWNLOADS_DIR,  # you should define this in settings.py
+            only_pdf_and_images=True,
+            ocr_lang="heb+eng",
+            ocr_max_pages=2,
+            digital_min_chars=200,
+            dpi=250,
+            tesseract_cmd=getattr(settings, "TESSERACT_CMD", None),
+            create_bill_mirror=True,
+        ),
+    )
+
+    try:
+        stats = service.run_query(
+            query=query,
+            max_per_page=max_per_page,
+            limit_messages=limit_messages,
+        )
+        return Response({"ok": True, "status": "done", "stats": stats}, status=status.HTTP_200_OK)
+    except Exception as e:
+        # keep it simple for now; later you can log exception details with logging/Sentry
+        return Response(
+            {"ok": False, "error": "fetch_failed", "details": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )

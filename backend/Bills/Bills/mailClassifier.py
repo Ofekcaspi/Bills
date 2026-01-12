@@ -1,152 +1,67 @@
-import os
-import re
+from __future__ import annotations
+
 import base64
 import hashlib
-import sqlite3
+import os
+import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
-
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
+from typing import Dict, List, Optional, Tuple
 
 import pdfplumber
-
-# OCR deps
 import pytesseract
 from pdf2image import convert_from_path
+from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+from django.db import transaction
 
-
-# =========================
-# DB (SQLite) - Dedup + Metadata + Amount/DueDate
-# =========================
-class AttachmentDB:
-    def __init__(self, db_path: str = "attachments.db"):
-        self.db_path = Path(db_path)
-        self.conn = sqlite3.connect(self.db_path)
-        self.conn.execute("PRAGMA journal_mode=WAL;")
-        self._init_tables()
-
-    def _init_tables(self) -> None:
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS attachments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_hash TEXT UNIQUE,
-
-                message_id TEXT,
-                attachment_id TEXT,
-                thread_id TEXT,
-
-                subject TEXT,
-                sender TEXT,
-                msg_date TEXT,
-                snippet TEXT,
-
-                filename TEXT,
-                category TEXT,
-                mime_type TEXT,
-                saved_path TEXT,
-
-                extracted_text_len INTEGER,
-
-                amount_value REAL,
-                amount_currency TEXT,
-                amount_source TEXT,
-
-                due_date_iso TEXT,
-                due_date_source TEXT,
-
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_message_id ON attachments(message_id)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_category ON attachments(category)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_due_date ON attachments(due_date_iso)")
-        self.conn.commit()
-
-    def exists_hash(self, file_hash: str) -> bool:
-        cur = self.conn.cursor()
-        cur.execute("SELECT 1 FROM attachments WHERE file_hash = ? LIMIT 1", (file_hash,))
-        return cur.fetchone() is not None
-
-    def insert(
-            self,
-            *,
-            file_hash: str,
-            message_id: str,
-            attachment_id: str,
-            thread_id: str,
-            subject: str,
-            sender: str,
-            msg_date: str,
-            snippet: str,
-            filename: str,
-            category: str,
-            mime_type: str,
-            saved_path: str,
-            extracted_text_len: int,
-            amount_value: Optional[float],
-            amount_currency: Optional[str],
-            amount_source: Optional[str],
-            due_date_iso: Optional[str],
-            due_date_source: Optional[str],
-    ) -> None:
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            INSERT OR IGNORE INTO attachments
-            (file_hash, message_id, attachment_id, thread_id, subject, sender, msg_date, snippet,
-             filename, category, mime_type, saved_path, extracted_text_len,
-             amount_value, amount_currency, amount_source,
-             due_date_iso, due_date_source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                file_hash, message_id, attachment_id, thread_id,
-                subject, sender, msg_date, snippet,
-                filename, category, mime_type, saved_path, extracted_text_len,
-                amount_value, amount_currency, amount_source,
-                due_date_iso, due_date_source
-            ),
-        )
-        self.conn.commit()
-
-    def close(self) -> None:
-        self.conn.close()
+from .models import Attachment, Bill
 
 
-# =========================
-# Gmail Downloader + Extract + Classify + Parse Amount/DueDate
-# =========================
-class GmailInvoiceDownloader:
-    def __init__(
-            self,
-            credentials_path: str,
-            download_root: str = "downloads",
-            tesseract_cmd: Optional[str] = None,  # ב-Windows: r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    ):
-        self.credentials_path = credentials_path
-        self.download_root = Path(download_root)
-        self.service = None
+@dataclass(frozen=True)
+class GmailFetchConfig:
+    download_root: Path
+    only_pdf_and_images: bool = True
+    ocr_lang: str = "heb+eng"
+    ocr_max_pages: int = 2
+    digital_min_chars: int = 200
+    dpi: int = 250
+    tesseract_cmd: Optional[str] = None
+    create_bill_mirror: bool = True  # create Bill rows too (optional)
 
-        if tesseract_cmd:
-            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 
-    def connect(self) -> None:
-        print("מכין תהליך התחברות ל-Google (OAuth2)...")
-        print("עכשיו ייפתח חלון בדפדפן לבחירת משתמש גוגל ואישור הרשאות.\n")
+class GmailInvoiceService:
+    """
+    Django-integrated Gmail fetcher:
+    - Requires already-established OAuth token (Credentials) -> builds Gmail API service.
+    - Downloads attachments -> classifies -> extracts amount/due date -> saves with Django ORM.
+    """
 
-        flow = InstalledAppFlow.from_client_secrets_file(self.credentials_path, SCOPES)
-        creds = flow.run_local_server(port=0, prompt="consent")
+    def __init__(self, *, creds: Credentials, config: GmailFetchConfig):
+        self.config = config
+        self.download_root = Path(config.download_root)
+        self.download_root.mkdir(parents=True, exist_ok=True)
 
-        print("ההתחברות הצליחה! בונה אובייקט שירות של Gmail API...\n")
+        if config.tesseract_cmd:
+            pytesseract.pytesseract.tesseract_cmd = config.tesseract_cmd
+
+        # Gmail API client from existing creds (NO browser / NO local_server)
         self.service = build("gmail", "v1", credentials=creds)
 
-    # ---------- Helpers ----------
+    # -------------------------
+    # Query builder
+    # -------------------------
+    @staticmethod
+    def build_default_query(time_window: str = "365d") -> str:
+        return (
+            f'has:attachment newer_than:{time_window} '
+            '(subject:חשבונית OR subject:קבלה OR subject:invoice OR subject:receipt OR "Tax Invoice" OR "Receipt")'
+        )
+
+    # -------------------------
+    # Helpers
+    # -------------------------
     @staticmethod
     def _sha256_bytes(data: bytes) -> str:
         return hashlib.sha256(data).hexdigest()
@@ -160,7 +75,7 @@ class GmailInvoiceDownloader:
     @staticmethod
     def _get_headers_map(message: Dict) -> Dict[str, str]:
         headers = message.get("payload", {}).get("headers", []) or []
-        hmap = {}
+        hmap: Dict[str, str] = {}
         for h in headers:
             n = (h.get("name") or "").lower()
             v = h.get("value") or ""
@@ -185,23 +100,25 @@ class GmailInvoiceDownloader:
                 found.append((filename, attachment_id, mime_type))
 
             if part.get("parts"):
-                found.extend(GmailInvoiceDownloader._collect_attachment_parts(part))
+                found.extend(GmailInvoiceService._collect_attachment_parts(part))
 
         return found
 
-    # ---------- Text extraction ----------
+    # -------------------------
+    # Text extraction (PDF + OCR fallback)
+    # -------------------------
     @staticmethod
     def extract_text_from_pdf(
             pdf_path: Path,
             *,
-            ocr_lang: str = "heb+eng",
-            ocr_max_pages: int = 10,
-            digital_min_chars: int = 200,
-            dpi: int = 250,
+            ocr_lang: str,
+            ocr_max_pages: int,
+            digital_min_chars: int,
+            dpi: int,
     ) -> str:
         text = ""
 
-        # A) Digital
+        # A) Digital text
         try:
             with pdfplumber.open(str(pdf_path)) as pdf:
                 chunks = []
@@ -218,7 +135,12 @@ class GmailInvoiceDownloader:
 
         # B) OCR fallback
         try:
-            images = convert_from_path(str(pdf_path), dpi=dpi, first_page=1, last_page=ocr_max_pages)
+            images = convert_from_path(
+                str(pdf_path),
+                dpi=dpi,
+                first_page=1,
+                last_page=ocr_max_pages,
+            )
             ocr_chunks = []
             for img in images:
                 ocr_chunks.append(pytesseract.image_to_string(img, lang=ocr_lang))
@@ -230,7 +152,9 @@ class GmailInvoiceDownloader:
 
         return text
 
-    # ---------- Classification ----------
+    # -------------------------
+    # Classification
+    # -------------------------
     @staticmethod
     def classify(subject: str, sender: str, snippet: str, extracted_text: str) -> str:
         s = f"{subject} {sender} {snippet} {extracted_text}".lower()
@@ -247,7 +171,7 @@ class GmailInvoiceDownloader:
             return "ביטוח"
         if any(k in s for k in ["סלקום", "פרטנר", "פלאפון", "הוט", "yes", "בזק", "internet", "mobile", "סיבים"]):
             return "תקשורת"
-        if any(k in s for k in ["ישראכרט", "max", "כאל", "visa", "mastercard", "פירוט עסקות", "דוח חיובים"]):
+        if any(k in s for k in ["ישראכרט", "max", "כאל", "visa", "mastercard", "פירוט עסקות", "דוח חיובים", "דוח חיובים"]):
             return "אשראי/בנק"
         if any(k in s for k in ["subscription", "מנוי", "membership", "renewal", "חיוב חודשי"]):
             return "מנויים"
@@ -256,38 +180,27 @@ class GmailInvoiceDownloader:
 
         return "אחר"
 
-    # ---------- Amount & Due date extraction ----------
+    # -------------------------
+    # Amount parsing
+    # -------------------------
     @staticmethod
     def _normalize_number(num_str: str) -> Optional[float]:
-        """
-        תומך ב:
-        1,234.56
-        1.234,56
-        1234.56
-        1234,56
-        1 234,56
-        """
         if not num_str:
             return None
         s = num_str.strip().replace(" ", "")
 
-        # אם יש גם '.' וגם ',' נחליט מי דסימל לפי המופע האחרון
         if "." in s and "," in s:
             if s.rfind(",") > s.rfind("."):
-                # 1.234,56 -> אלפים '.' דסימל ','
                 s = s.replace(".", "").replace(",", ".")
             else:
-                # 1,234.56 -> אלפים ',' דסימל '.'
                 s = s.replace(",", "")
         else:
-            # רק ',' -> נניח שזה דסימלי אם יש 1-2 ספרות אחרי
             if "," in s:
                 parts = s.split(",")
                 if len(parts) == 2 and 1 <= len(parts[1]) <= 2:
                     s = s.replace(",", ".")
                 else:
                     s = s.replace(",", "")
-            # רק '.' -> נשאיר כרגיל (או נסיר אלפים אם יש יותר מנקודה אחת)
             if s.count(".") > 1:
                 s = s.replace(".", "")
 
@@ -298,43 +211,33 @@ class GmailInvoiceDownloader:
 
     @staticmethod
     def extract_amount_and_currency(text: str) -> Tuple[Optional[float], Optional[str], Optional[str]]:
-        """
-        מחזיר: (amount_value, currency, source_label)
-        source_label מסביר מאיזה "סימן" חילצנו (לצורך Debug/הסבר).
-        """
         if not text:
             return None, None, None
 
-        t = " ".join(text.split())  # normalize spaces
+        t = " ".join(text.split())
 
-        # מיפוי מטבע
         currency_patterns = [
             ("ILS", r"(₪|ש\"?ח|שח|nis\b|ils\b)"),
             ("USD", r"(\$|usd\b)"),
             ("EUR", r"(€|eur\b)"),
         ]
 
-        # תבניות "סכום לתשלום" בעברית/אנגלית
         label_patterns = [
             ("amount_due", r"(סכום\s*לתשלום|לתשלום|סה\"?כ\s*לתשלום|total\s*due|amount\s*due|balance\s*due)"),
             ("total", r"(סה\"?כ|סך\s*הכל|total)"),
         ]
 
-        # מספר כסף: 1,234.56 / 1.234,56 / 1234.56 / 1234,56
         money_number = r"(\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})|\d+(?:[.,]\d{1,2})?)"
-
         candidates: List[Tuple[float, str, str]] = []
 
-        # 1) קודם נחפש ליד תוויות (עד ~40 תווים אחרי)
         for label_name, lp in label_patterns:
             for m in re.finditer(lp, t, flags=re.IGNORECASE):
                 window = t[m.end(): m.end() + 60]
                 nm = re.search(money_number, window)
                 if nm:
-                    val = GmailInvoiceDownloader._normalize_number(nm.group(1))
+                    val = GmailInvoiceService._normalize_number(nm.group(1))
                     if val is not None:
                         currency = None
-                        # חפש מטבע בסביבה הקרובה (לפני/אחרי)
                         near = t[max(0, m.start() - 20): m.end() + 60]
                         for ccode, cp in currency_patterns:
                             if re.search(cp, near, flags=re.IGNORECASE):
@@ -342,10 +245,9 @@ class GmailInvoiceDownloader:
                                 break
                         candidates.append((val, currency or "ILS", f"label:{label_name}"))
 
-        # 2) אם לא מצאנו — fallback: “המספר הכי גדול” עם סימן מטבע באיזור
         if not candidates:
             for nm in re.finditer(money_number, t):
-                val = GmailInvoiceDownloader._normalize_number(nm.group(1))
+                val = GmailInvoiceService._normalize_number(nm.group(1))
                 if val is None:
                     continue
                 near = t[max(0, nm.start() - 10): nm.end() + 10]
@@ -354,45 +256,34 @@ class GmailInvoiceDownloader:
                     if re.search(cp, near, flags=re.IGNORECASE):
                         currency = ccode
                         break
-                # ניקח רק אם נראה שזה כסף (מטבע או גודל סביר)
                 if currency or val > 10:
                     candidates.append((val, currency or "ILS", "fallback:max-number"))
 
         if not candidates:
             return None, None, None
 
-        # ניקח את המועמד עם הערך הגבוה ביותר (ברוב החשבוניות ה-total הוא הגבוה)
         best = max(candidates, key=lambda x: x[0])
         return best[0], best[1], best[2]
 
+    # -------------------------
+    # Due date parsing
+    # -------------------------
     @staticmethod
     def extract_due_date_iso(text: str) -> Tuple[Optional[str], Optional[str]]:
-        """
-        מחזיר (YYYY-MM-DD, source_label).
-        תומך ב:
-        - "לתשלום עד 31/01/2026"
-        - "תאריך יעד: 31-01-2026"
-        - "due date 2026-01-31"
-        """
         if not text:
             return None, None
 
         t = " ".join(text.split()).lower()
 
-        # מילות מפתח שמרמזות על תאריך יעד
         due_labels = [
             ("due", r"(לתשלום\s*עד|עד\s*תאריך|מועד\s*תשלום|תאריך\s*יעד|תשלום\s*עד|due\s*date|pay\s*by|payment\s*due)"),
         ]
 
-        # פורמטים:
-        # dd/mm/yyyy או dd-mm-yyyy
         dmy = r"(\b\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b)"
-        # yyyy-mm-dd או yyyy/mm/dd
         ymd = r"(\b\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}\b)"
 
         def to_iso(date_str: str) -> Optional[str]:
             ds = date_str.strip()
-            # ymd
             m = re.match(r"^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$", ds)
             if m:
                 y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -400,7 +291,6 @@ class GmailInvoiceDownloader:
                     return f"{y:04d}-{mo:02d}-{d:02d}"
                 return None
 
-            # dmy
             m = re.match(r"^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$", ds)
             if m:
                 d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -410,7 +300,6 @@ class GmailInvoiceDownloader:
                     return f"{y:04d}-{mo:02d}-{d:02d}"
             return None
 
-        # 1) נחפש תאריך ליד "תשלום עד"/"due date"
         for label_name, lp in due_labels:
             for m in re.finditer(lp, t):
                 window = t[m.end(): m.end() + 80]
@@ -420,14 +309,12 @@ class GmailInvoiceDownloader:
                     if iso:
                         return iso, f"label:{label_name}"
 
-        # 2) fallback: אם יש ymd anywhere (בדרך כלל ברור יותר)
         all_ymd = re.findall(ymd, t)
         for ds in all_ymd:
             iso = to_iso(ds)
             if iso:
                 return iso, "fallback:ymd"
 
-        # 3) fallback: לקחת dmy האחרון (לפעמים יש כמה תאריכים; האחרון הוא יעד)
         all_dmy = re.findall(dmy, t)
         for ds in reversed(all_dmy):
             iso = to_iso(ds)
@@ -436,11 +323,164 @@ class GmailInvoiceDownloader:
 
         return None, None
 
-    # ---------- Download ----------
-    def _download_attachments_for_message(
+    # -------------------------
+    # ORM utilities
+    # -------------------------
+    @staticmethod
+    def _exists_hash(file_hash: str) -> bool:
+        return Attachment.objects.filter(file_hash=file_hash).exists()
+
+    @staticmethod
+    def _upsert_attachment(
+            *,
+            file_hash: str,
+            message_id: str,
+            attachment_id: str,
+            thread_id: str,
+            subject: str,
+            sender: str,
+            msg_date: str,
+            snippet: str,
+            filename: str,
+            category: str,
+            mime_type: str,
+            saved_path: str,
+            extracted_text_len: int,
+            amount_value: Optional[float],
+            amount_currency: Optional[str],
+            amount_source: Optional[str],
+            due_date_iso: Optional[str],
+            due_date_source: Optional[str],
+    ) -> Attachment:
+        """
+        Uses update_or_create to be idempotent and safe for re-runs.
+        Unique key is file_hash (matches your model unique constraint).
+        """
+        obj, _created = Attachment.objects.update_or_create(
+            file_hash=file_hash,
+            defaults=dict(
+                message_id=message_id,
+                attachment_id=attachment_id,
+                thread_id=thread_id,
+                subject=subject,
+                sender=sender,
+                msg_date=msg_date,
+                snippet=snippet,
+                filename=filename,
+                category=category,
+                mime_type=mime_type,
+                saved_path=saved_path,
+                extracted_text_len=extracted_text_len,
+                amount_value=amount_value,
+                amount_currency=amount_currency,
+                amount_source=amount_source,
+                due_date_iso=due_date_iso,
+                due_date_source=due_date_source,
+            ),
+        )
+        return obj
+
+    @staticmethod
+    def _create_bill_mirror_if_enabled(*, enabled: bool, att: Attachment) -> None:
+        if not enabled:
+            return
+
+        # Your Bill model is thinner; we mirror what fits.
+        Bill.objects.create(
+            category=att.category,
+            subject=att.subject,
+            sender=att.sender,
+            filename=att.filename,
+            amount_value=att.amount_value,
+            amount_currency=att.amount_currency,
+            due_date_iso=att.due_date_iso,
+            saved_path=att.saved_path,  # should be relative
+        )
+
+    # -------------------------
+    # Core download/save flow (used by views)
+    # -------------------------
+    def run_query(
             self,
             *,
-            db: AttachmentDB,
+            query: str,
+            user_id: str = "me",
+            max_per_page: int = 100,
+            limit_messages: Optional[int] = None,
+    ) -> dict:
+        """
+        Main entrypoint for a future get_emails view.
+        Returns stats dict.
+        """
+        page_token = None
+        total_msgs = 0
+        total_files_saved = 0
+        total_rows_upserted = 0
+        total_skipped_duplicates = 0
+
+        while True:
+            resp = self.service.users().messages().list(
+                userId=user_id,
+                q=query,
+                maxResults=max_per_page,
+                pageToken=page_token,
+            ).execute()
+
+            msgs = resp.get("messages", []) or []
+
+            for m in msgs:
+                if limit_messages is not None and total_msgs >= limit_messages:
+                    return {
+                        "emails_processed": total_msgs,
+                        "files_saved": total_files_saved,
+                        "rows_upserted": total_rows_upserted,
+                        "skipped_duplicates": total_skipped_duplicates,
+                        "stopped_reason": "limit_messages",
+                    }
+
+                message_id = m["id"]
+                msg_full = self.service.users().messages().get(userId=user_id, id=message_id).execute()
+
+                headers = self._get_headers_map(msg_full)
+                subject = headers.get("subject", "")
+                sender = headers.get("from", "")
+                msg_date = headers.get("date", "")
+                snippet = msg_full.get("snippet", "")
+                thread_id = msg_full.get("threadId", "") or ""
+
+                category_hint = self.classify(subject, sender, snippet, extracted_text="")
+
+                saved_count, upsert_count, skipped_count = self._process_message_attachments(
+                    message_id=message_id,
+                    thread_id=thread_id,
+                    subject=subject,
+                    sender=sender,
+                    msg_date=msg_date,
+                    snippet=snippet,
+                    category_hint=category_hint,
+                    user_id=user_id,
+                )
+
+                total_msgs += 1
+                total_files_saved += saved_count
+                total_rows_upserted += upsert_count
+                total_skipped_duplicates += skipped_count
+
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+
+        return {
+            "emails_processed": total_msgs,
+            "files_saved": total_files_saved,
+            "rows_upserted": total_rows_upserted,
+            "skipped_duplicates": total_skipped_duplicates,
+            "stopped_reason": None,
+        }
+
+    def _process_message_attachments(
+            self,
+            *,
             message_id: str,
             thread_id: str,
             subject: str,
@@ -448,24 +488,42 @@ class GmailInvoiceDownloader:
             msg_date: str,
             snippet: str,
             category_hint: str,
-    ) -> List[Path]:
-        msg = self.service.users().messages().get(userId="me", id=message_id).execute()
+            user_id: str,
+    ) -> tuple[int, int, int]:
+        """
+        Returns: (files_saved, rows_upserted, skipped_duplicates)
+        """
+        msg = self.service.users().messages().get(userId=user_id, id=message_id).execute()
         attachments = self._collect_attachment_parts(msg.get("payload", {}))
         if not attachments:
-            return []
+            return 0, 0, 0
 
-        saved_paths: List[Path] = []
+        files_saved = 0
+        rows_upserted = 0
+        skipped_duplicates = 0
 
         for filename, attachment_id, mime_type in attachments:
+            if not filename or not attachment_id:
+                continue
+
+            filename_lower = filename.lower()
+            if self.config.only_pdf_and_images and not filename_lower.endswith((".pdf", ".png", ".jpg", ".jpeg")):
+                continue
+
             att = self.service.users().messages().attachments().get(
-                userId="me", messageId=message_id, id=attachment_id
+                userId=user_id, messageId=message_id, id=attachment_id
             ).execute()
 
-            file_bytes = base64.urlsafe_b64decode(att["data"].encode("UTF-8"))
+            data = att.get("data")
+            if not data:
+                continue
+
+            file_bytes = base64.urlsafe_b64decode(data.encode("UTF-8"))
             file_hash = self._sha256_bytes(file_bytes)
 
-            if db.exists_hash(file_hash):
-                print(f"⏭️ דילוג כפילות: {filename}")
+            # Dedup by hash (fast + reliable)
+            if self._exists_hash(file_hash):
+                skipped_duplicates += 1
                 continue
 
             safe_name = self._safe_filename(filename)
@@ -473,31 +531,28 @@ class GmailInvoiceDownloader:
             name, ext = os.path.splitext(safe_name)
             out_name = f"{name}_{unique_suffix}{ext}" if ext else f"{name}_{unique_suffix}"
 
+            # Save first into hint category folder
             temp_dir = self.download_root / category_hint
             temp_dir.mkdir(parents=True, exist_ok=True)
             out_path = temp_dir / out_name
+            out_path.write_bytes(file_bytes)
 
-            with open(out_path, "wb") as f:
-                f.write(file_bytes)
-
-            # חילוץ טקסט + סיווג משופר
             extracted_text = ""
             if ext.lower() == ".pdf":
                 extracted_text = self.extract_text_from_pdf(
                     out_path,
-                    ocr_lang="heb+eng",
-                    ocr_max_pages=2,       # תוכל להעלות ל-5 אם צריך
-                    digital_min_chars=200,
-                    dpi=250,
+                    ocr_lang=self.config.ocr_lang,
+                    ocr_max_pages=self.config.ocr_max_pages,
+                    digital_min_chars=self.config.digital_min_chars,
+                    dpi=self.config.dpi,
                 )
 
             final_category = self.classify(subject, sender, snippet, extracted_text)
 
-            # חילוץ סכום ותאריך יעד מהטקסט
             amount_value, amount_currency, amount_source = self.extract_amount_and_currency(extracted_text)
             due_date_iso, due_date_source = self.extract_due_date_iso(extracted_text)
 
-            # להעביר לתיקיית הקטגוריה הסופית
+            # Move to final category directory if changed
             if final_category != category_hint:
                 final_dir = self.download_root / final_category
                 final_dir.mkdir(parents=True, exist_ok=True)
@@ -508,137 +563,34 @@ class GmailInvoiceDownloader:
                 except Exception:
                     pass
 
-            # רושמים ל-DB
-            db.insert(
-                file_hash=file_hash,
-                message_id=message_id,
-                attachment_id=attachment_id,
-                thread_id=thread_id,
-                subject=subject,
-                sender=sender,
-                msg_date=msg_date,
-                snippet=snippet,
-                filename=safe_name,
-                category=final_category,
-                mime_type=mime_type,
-                saved_path=str(out_path),
-                extracted_text_len=len(extracted_text),
-                amount_value=amount_value,
-                amount_currency=amount_currency,
-                amount_source=amount_source,
-                due_date_iso=due_date_iso,
-                due_date_source=due_date_source,
-            )
+            # Store saved_path as RELATIVE under download_root (fits your models)
+            rel_saved_path = out_path.relative_to(self.download_root).as_posix()
 
-            print(
-                f"✅ נשמר: {out_path} | "
-                f"amount={amount_value} {amount_currency} ({amount_source}) | "
-                f"due={due_date_iso} ({due_date_source})"
-            )
-
-            saved_paths.append(out_path)
-
-        return saved_paths
-
-    # ---------- Main flow ----------
-    def download_from_query(
-            self,
-            *,
-            db: AttachmentDB,
-            query: str,
-            max_per_page: int = 100,
-            limit_messages: Optional[int] = None,
-    ) -> None:
-        if not self.service:
-            raise RuntimeError("Service not connected. Call connect() first.")
-
-        print(f"🔎 Query: {query}")
-        page_token = None
-        total_msgs = 0
-        total_files = 0
-
-        while True:
-            resp = self.service.users().messages().list(
-                userId="me",
-                q=query,
-                maxResults=max_per_page,
-                pageToken=page_token,
-            ).execute()
-
-            msgs = resp.get("messages", []) or []
-
-            for m in msgs:
-                if limit_messages is not None and total_msgs >= limit_messages:
-                    print(f"⛔ הגעת להגבלת הודעות: {limit_messages}")
-                    print(f"✅ סה\"כ הודעות: {total_msgs} | סה\"כ קבצים: {total_files}")
-                    return
-
-                message_id = m["id"]
-                msg_full = self.service.users().messages().get(userId="me", id=message_id).execute()
-
-                headers = self._get_headers_map(msg_full)
-                subject = headers.get("subject", "")
-                sender = headers.get("from", "")
-                msg_date = headers.get("date", "")
-                snippet = msg_full.get("snippet", "")
-                thread_id = msg_full.get("threadId", "")
-
-                category_hint = self.classify(subject, sender, snippet, extracted_text="")
-
-                paths = self._download_attachments_for_message(
-                    db=db,
+            # Save DB row (atomic per attachment)
+            with transaction.atomic():
+                row = self._upsert_attachment(
+                    file_hash=file_hash,
                     message_id=message_id,
+                    attachment_id=attachment_id,
                     thread_id=thread_id,
                     subject=subject,
                     sender=sender,
                     msg_date=msg_date,
                     snippet=snippet,
-                    category_hint=category_hint,
+                    filename=safe_name,
+                    category=final_category,
+                    mime_type=mime_type,
+                    saved_path=rel_saved_path,
+                    extracted_text_len=len(extracted_text),
+                    amount_value=amount_value,
+                    amount_currency=amount_currency,
+                    amount_source=amount_source,
+                    due_date_iso=due_date_iso,
+                    due_date_source=due_date_source,
                 )
+                self._create_bill_mirror_if_enabled(enabled=self.config.create_bill_mirror, att=row)
 
-                total_msgs += 1
-                total_files += len(paths)
+            files_saved += 1
+            rows_upserted += 1
 
-                if not paths:
-                    print(f"📩 {total_msgs}. {subject[:60]} | הורדו: 0 (ייתכן inline/מבנה לא סטנדרטי)")
-
-            page_token = resp.get("nextPageToken")
-            if not page_token:
-                break
-
-        print(f"\n✅ סיום. סה\"כ הודעות: {total_msgs} | סה\"כ קבצים שהורדו: {total_files}")
-        print(f"📁 downloads: {self.download_root.resolve()}")
-        print(f"🗄️ DB: {db.db_path.resolve()}")
-
-
-def main():
-    # אם אתה ב-Windows וזה לא מוצא Tesseract, תגדיר כאן:
-    # tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    tesseract_path = None
-
-    downloader = GmailInvoiceDownloader(
-        credentials_path="../old be/credentials.json",  # עדכן נתיב אם צריך
-        download_root="downloads",
-        tesseract_cmd=tesseract_path,
-    )
-    downloader.connect()
-
-    db = AttachmentDB("../backend/attachments.db")
-
-    query = (
-        'has:attachment newer_than:365d '
-        '(subject:חשבונית OR subject:קבלה OR subject:invoice OR subject:receipt OR "Tax Invoice" OR "Receipt")'
-    )
-
-    downloader.download_from_query(
-        db=db,
-        query=query,
-        max_per_page=100,
-        limit_messages=None,  # אפשר לשים 200 לבדיקה
-    )
-
-    db.close()
-
-
-if __name__ == "__main__":
-    main()
+        return files_saved, rows_upserted, skipped_duplicates
