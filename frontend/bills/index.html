@@ -1,13 +1,50 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>bills</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>bills</title>
+
+  <!-- Google Identity Services -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- מקום ל-One Tap/Config -->
+<div
+        id="g_id_onload"
+        data-client_id="YOUR_CLIENT_ID.apps.googleusercontent.com"
+        data-callback="handleGoogleCredential"
+        data-auto_prompt="false"
+></div>
+
+<!-- הכפתור עצמו -->
+<div class="g_id_signin"
+     data-type="standard"
+     data-size="large"
+     data-theme="outline"
+     data-text="sign_in_with"
+></div>
+
+<script type="module" src="/src/main.jsx"></script>
+
+<script>
+  // נקרא אוטומטית ע"י Google אחרי login
+  window.handleGoogleCredential = async (response) => {
+    // response.credential זה ה-ID token (JWT)
+    const idToken = response.credential;
+
+    // שלח לשרת שלך כדי ליצור/להתחבר משתמש
+    const res = await fetch("http://127.0.0.1:8000/connect-email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ credential: idToken }),
+    });
+
+    const data = await res.json();
+    console.log("server response:", data);
+  };
+</script>
+</body>
 </html>
