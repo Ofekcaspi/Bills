@@ -1,61 +1,116 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 
 const API_BASE = "http://127.0.0.1:8000";
 
-export default function App() {
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState("");
-    const [status, setStatus] = useState("unknown"); // unknown | connected | not_connected
-    const [serverInfo, setServerInfo] = useState(null);
+function money(v, cur) {
+    if (v == null) return "—";
+    const n = Number(v);
+    if (Number.isNaN(n)) return `${v} ${cur || ""}`.trim();
+    return `${n.toFixed(2)} ${cur || ""}`.trim();
+}
 
-    async function checkConnection() {
+function fileUrlFromSavedPath(saved_path) {
+    if (!saved_path) return "";
+    // Normalize windows path -> url path
+    const norm = saved_path.replaceAll("\\", "/"); // חשוב!
+    const rel = norm.replace(/^downloads\//, "");
+    return `http://127.0.0.1:8000/files/${encodeURI(rel)}`;
+}
+
+export default function App() {
+    const [items, setItems] = useState([]);
+    const [summary, setSummary] = useState(null);
+    const [upcoming, setUpcoming] = useState(null);
+
+    const [q, setQ] = useState("");
+    const [category, setCategory] = useState("");
+
+    const [loading, setLoading] = useState(true);
+    const [syncing, setSyncing] = useState(false);
+    const [error, setError] = useState("");
+
+    const categories = useMemo(() => {
+        const set = new Set(items.map((x) => x.category).filter(Boolean));
+        return Array.from(set);
+    }, [items]);
+
+    const filtered = useMemo(() => {
+        const qq = q.trim().toLowerCase();
+        return items.filter((x) => {
+            if (category && x.category !== category) return false;
+            if (!qq) return true;
+            const hay = `${x.subject || ""} ${x.sender || ""} ${x.filename || ""}`.toLowerCase();
+            return hay.includes(qq);
+        });
+    }, [items, q, category]);
+
+    async function loadDashboard() {
         try {
             setLoading(true);
             setError("");
 
-            // חשוב: כדי שסשן (state) יעבוד ב-Django
-            const res = await fetch(`${API_BASE}/connect-email/`, {
-                method: "GET",
-                credentials: "include",
-                headers: { Accept: "application/json" },
-            });
+            const [billsRes, sumRes, upRes] = await Promise.all([
+                fetch(`${API_BASE}/bills/`, { credentials: "include" }),
+                fetch(`${API_BASE}/summary/`, { credentials: "include" }),
+                fetch(`${API_BASE}/upcoming/`, { credentials: "include" }),
+            ]);
 
-            // אם השרת עשה redirect לגוגל, fetch בדרך כלל יחזיר HTML/שגיאה/או לא JSON.
-            // ננסה לפרסר JSON ואם זה לא JSON -> ניפול ל-not_connected.
-            const ct = res.headers.get("content-type") || "";
-            if (!ct.includes("application/json")) {
-                setStatus("not_connected");
-                setServerInfo(null);
-                return;
-            }
+            // אם המשתמש לא מחובר, sync/bills עלול להחזיר 401 (תלוי במימוש שלך)
+            if (!billsRes.ok) throw new Error(`Bills API error: ${billsRes.status}`);
+            if (!sumRes.ok) throw new Error(`Summary API error: ${sumRes.status}`);
+            if (!upRes.ok) throw new Error(`Upcoming API error: ${upRes.status}`);
 
-            const data = await res.json();
-            setServerInfo(data);
+            const billsData = await billsRes.json();
+            const sumData = await sumRes.json();
+            const upData = await upRes.json();
 
-            if (data?.ok && (data?.status === "already_connected" || data?.status === "connected")) {
-                setStatus("connected");
-            } else {
-                setStatus("not_connected");
-            }
+            setItems(billsData.items || []);
+            setSummary(sumData);
+            setUpcoming(upData);
         } catch (e) {
-            // הכי נפוץ: לא מחובר/redirect חסום/בעיה ב-CORS
-            setStatus("not_connected");
-            setServerInfo(null);
-            setError(e?.message || "Failed to check connection");
+            setError(e?.message || "Failed to load");
         } finally {
             setLoading(false);
         }
     }
 
-    useEffect(() => {
-        checkConnection();
-    }, []);
+    async function syncNow() {
+        try {
+            setSyncing(true);
+            setError("");
 
-    const startOAuth = () => {
-        // OAuth חייב להיות ניווט של הדפדפן (לא fetch)
-        window.location.href = `${API_BASE}/connect-email/`;
-    };
+            const res = await fetch(`${API_BASE}/sync/`, {
+                method: "POST",
+                credentials: "include",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ max_results: 30 }),
+            });
+
+            if (res.status === 401) {
+                // לא מחובר -> נשלח להתחברות
+                window.location.href = `${API_BASE}/connect-email/`;
+                return;
+            }
+
+            if (!res.ok) {
+                const txt = await res.text().catch(() => "");
+                throw new Error(`Sync error: ${res.status} ${txt}`);
+            }
+
+            // לאחר סנכרון, נטען מחדש
+            await loadDashboard();
+        } catch (e) {
+            setError(e?.message || "Sync failed");
+        } finally {
+            setSyncing(false);
+        }
+    }
+
+    useEffect(() => {
+        loadDashboard();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     return (
         <div className="page" dir="rtl" lang="he">
@@ -63,7 +118,7 @@ export default function App() {
                 <div className="container topbarInner">
                     <div>
                         <div className="title">Bills Dashboard</div>
-                        <div className="subtitle">סטטוס התחברות ל-Gmail</div>
+                        <div className="subtitle">ניהול חשבוניות • סיווג • סכומים • תאריכי יעד</div>
                     </div>
                     <div className="chip">
                         API: <span className="mono">{API_BASE}</span>
@@ -72,62 +127,126 @@ export default function App() {
             </header>
 
             <main className="container main">
-                {loading && <div className="card center">בודק התחברות…</div>}
+                {loading && <div className="card center">טוען נתונים…</div>}
 
-                {!loading && (
+                {!loading && error && (
                     <div className="card">
-                        <div style={{ display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between" }}>
-                            <div>
-                                <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 6 }}>
-                                    {status === "connected" ? "✅ מחובר ל-Gmail" : "🔒 לא מחובר ל-Gmail"}
-                                </div>
-                                <div style={{ opacity: 0.8 }}>
-                                    {status === "connected"
-                                        ? "אפשר להמשיך לשלב הבא (שליפה/ניתוח חשבוניות) לאחר שתוסיף endpoints מתאימים בבק."
-                                        : "כדי לאשר גישה למיילים, צריך להתחבר דרך Google OAuth."}
-                                </div>
-                            </div>
-
-                            <div style={{ display: "flex", gap: 10 }}>
-                                {status !== "connected" && (
-                                    <button className="btn" onClick={startOAuth}>
-                                        התחבר עם Google
-                                    </button>
-                                )}
-                                <button className="btn" onClick={checkConnection}>
-                                    רענן סטטוס
-                                </button>
-                            </div>
-                        </div>
-
-                        {error && (
-                            <div style={{ marginTop: 12 }}>
-                                <div className="errorTitle">הערה</div>
-                                <div className="errorText">{error}</div>
-                                <div className="hint">אם אתה רואה שגיאת CORS/Network, ודא שה-API רץ ושמוגדר CORS+credentials.</div>
-                            </div>
-                        )}
-
-                        {serverInfo && (
-                            <pre
-                                style={{
-                                    marginTop: 12,
-                                    background: "rgba(0,0,0,0.05)",
-                                    padding: 12,
-                                    borderRadius: 12,
-                                    overflow: "auto",
-                                    direction: "ltr",
-                                    textAlign: "left",
-                                }}
-                            >
-                {JSON.stringify(serverInfo, null, 2)}
-              </pre>
-                        )}
-
-                        <div style={{ marginTop: 12, opacity: 0.75 }}>
-                            טיפ: אפשר לפתוח את <span className="mono">{API_BASE}/admin/</span> או לבדוק את השרת דרך logs.
+                        <div className="errorTitle">שגיאה</div>
+                        <div className="errorText">{error}</div>
+                        <div className="hint">
+                            ודא שה־API רץ על {API_BASE}. אם צריך להתחבר לג׳ימייל, לחץ "סנכרן" והוא יפנה להתחברות.
                         </div>
                     </div>
+                )}
+
+                {!loading && !error && (
+                    <>
+                        {/* KPIs */}
+                        <section className="grid3">
+                            <div className="kpi">
+                                <div className="kpiLabel">סה״כ חשבוניות</div>
+                                <div className="kpiValue">{items.length}</div>
+                            </div>
+                            <div className="kpi">
+                                <div className="kpiLabel">סה״כ סכומים (amount)</div>
+                                <div className="kpiValue">{Number(summary?.total || 0).toFixed(2)}</div>
+                            </div>
+                            <div className="kpi">
+                                <div className="kpiLabel">תשלומים קרובים (14 יום)</div>
+                                <div className="kpiValue">{upcoming?.count ?? 0}</div>
+                            </div>
+                        </section>
+
+                        {/* Actions + Filters */}
+                        <section className="card filters" style={{ alignItems: "center", gap: 12 }}>
+                            <div className="filtersLeft" style={{ flexWrap: "wrap", gap: 10 }}>
+                                <button className="btn" onClick={syncNow} disabled={syncing}>
+                                    {syncing ? "מסנכרן…" : "סנכרן חשבוניות מהמייל"}
+                                </button>
+
+                                <input
+                                    className="input"
+                                    value={q}
+                                    onChange={(e) => setQ(e.target.value)}
+                                    placeholder="חיפוש לפי נושא / שולח / שם קובץ…"
+                                />
+                                <select className="select" value={category} onChange={(e) => setCategory(e.target.value)}>
+                                    <option value="">כל הקטגוריות</option>
+                                    {categories.map((c) => (
+                                        <option key={c} value={c}>
+                                            {c}
+                                        </option>
+                                    ))}
+                                </select>
+                                <button
+                                    className="btn"
+                                    onClick={() => {
+                                        setQ("");
+                                        setCategory("");
+                                    }}
+                                >
+                                    נקה
+                                </button>
+
+                                <button className="btn" onClick={loadDashboard} disabled={loading || syncing}>
+                                    רענן
+                                </button>
+                            </div>
+
+                            <div className="filtersRight">
+                                מציג <b>{filtered.length}</b> מתוך <b>{items.length}</b>
+                            </div>
+                        </section>
+
+                        {/* Table */}
+                        <section className="card tableCard">
+                            <div className="tableHeader">
+                                <div className="tableTitle">רשימת חשבוניות</div>
+                                <div className="tableHint">לחץ “פתח PDF” כדי לראות את המסמך</div>
+                            </div>
+
+                            <div className="tableWrap">
+                                <table className="table">
+                                    <thead>
+                                    <tr>
+                                        <th>קטגוריה</th>
+                                        <th>שולח</th>
+                                        <th>נושא</th>
+                                        <th>סכום</th>
+                                        <th>תאריך יעד</th>
+                                        <th>קובץ</th>
+                                    </tr>
+                                    </thead>
+                                    <tbody>
+                                    {filtered.map((x) => {
+                                        const url = fileUrlFromSavedPath(x.saved_path);
+                                        const due = x.due_date_iso || "—";
+                                        const dueSoon = x.due_date_iso && upcoming?.items?.some((u) => u.id === x.id);
+
+                                        return (
+                                            <tr key={x.id} className={dueSoon ? "rowWarn" : ""}>
+                                                <td className="nowrap">{x.category || "—"}</td>
+                                                <td className="truncate">{x.sender || "—"}</td>
+                                                <td className="truncate">{x.subject || "—"}</td>
+                                                <td className="nowrap">{money(x.amount_value, x.amount_currency)}</td>
+                                                <td className="nowrap">{due}</td>
+                                                <td className="nowrap">
+                                                    {x.saved_path ? (
+                                                        <a className="linkBtn" href={url} target="_blank" rel="noreferrer">
+                                                            פתח PDF
+                                                        </a>
+                                                    ) : (
+                                                        "—"
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </section>
+                    </>
                 )}
             </main>
         </div>

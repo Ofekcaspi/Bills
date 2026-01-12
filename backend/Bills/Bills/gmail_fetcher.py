@@ -3,11 +3,13 @@ from __future__ import annotations
 import base64
 import email.utils
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Optional
 from datetime import datetime, timezone
 
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
+
+from .categorizer import classify_category
 
 
 def _parse_rfc2822_date(s: str) -> Optional[datetime]:
@@ -21,12 +23,12 @@ def _parse_rfc2822_date(s: str) -> Optional[datetime]:
 
 
 def _safe_filename(name: str) -> str:
-    # מינימלי – מנקה תווים בעייתיים
-    bad = ['..', '/', '\\', ':', '*', '?', '"', '<', '>', '|']
-    out = name
+    bad = ["..", "/", "\\", ":", "*", "?", '"', "<", ">", "|"]
+    out = name or ""
     for b in bad:
         out = out.replace(b, "_")
-    return out.strip() or "file.pdf"
+    out = out.strip()
+    return out or "file.pdf"
 
 
 def fetch_invoice_attachments(
@@ -44,10 +46,16 @@ def fetch_invoice_attachments(
 
     service = build("gmail", "v1", credentials=creds)
 
-    # 1) Search
     resp = service.users().messages().list(userId="me", q=query, maxResults=max_results).execute()
     msgs = resp.get("messages", []) or []
     results: List[dict] = []
+
+    def walk(p):
+        if not p:
+            return
+        yield p
+        for ch in (p.get("parts") or []):
+            yield from walk(ch)
 
     for m in msgs:
         msg_id = m["id"]
@@ -59,16 +67,7 @@ def fetch_invoice_attachments(
         date_raw = headers.get("date")
         msg_date = _parse_rfc2822_date(date_raw) if date_raw else None
 
-        # 2) Iterate parts
         payload = full.get("payload", {})
-        parts = payload.get("parts", []) or []
-
-        def walk(p):
-            if not p:
-                return
-            yield p
-            for ch in (p.get("parts") or []):
-                yield from walk(ch)
 
         for part in walk(payload):
             filename = part.get("filename") or ""
@@ -84,7 +83,7 @@ def fetch_invoice_attachments(
             att = service.users().messages().attachments().get(
                 userId="me",
                 messageId=msg_id,
-                id=att_id
+                id=att_id,
             ).execute()
 
             data = att.get("data")
@@ -95,7 +94,6 @@ def fetch_invoice_attachments(
             safe = _safe_filename(filename or f"{msg_id}.pdf")
             out_path = downloads_dir / safe
 
-            # אם כבר קיים – תוסיף suffix
             if out_path.exists():
                 stem = out_path.stem
                 suf = out_path.suffix
@@ -109,18 +107,22 @@ def fetch_invoice_attachments(
 
             out_path.write_bytes(file_bytes)
 
-            results.append({
-                "message_id": msg_id,
-                "attachment_id": att_id,
-                "subject": subject,
-                "sender": sender,
-                "msg_date": msg_date,
-                "filename": out_path.name,
-                "saved_path": f"downloads/{out_path.name}",
-                "category": None,
-                "amount_value": None,
-                "amount_currency": None,
-                "due_date_iso": None,
-            })
+            category = classify_category(subject, sender, out_path.name)
+
+            results.append(
+                {
+                    "message_id": msg_id,
+                    "attachment_id": att_id,
+                    "subject": subject,
+                    "sender": sender,
+                    "msg_date": msg_date,
+                    "filename": out_path.name,
+                    "saved_path": f"downloads/{out_path.name}",
+                    "category": category,
+                    "amount_value": None,
+                    "amount_currency": None,
+                    "due_date_iso": None,
+                }
+            )
 
     return results
