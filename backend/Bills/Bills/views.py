@@ -95,7 +95,7 @@ def sync_gmail(request):
         )
     time_window=request.data.get("time_window")
     query = request.data.get("query") or (
-        'has:attachment filename:pdf (invoice OR receipt OR "חשבונית" OR "קבלה" OR "חשבונית מס" OR "Tax Invoice")'
+        '(invoice OR receipt OR "חשבונית" OR "קבלה" OR "חשבונית מס" OR "Tax Invoice")'
     )
 
     max_results = int(request.data.get("max_results") or 20)

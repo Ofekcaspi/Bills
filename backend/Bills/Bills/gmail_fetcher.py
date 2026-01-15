@@ -37,17 +37,11 @@ def fetch_invoice_attachments(
         downloads_dir: Path,
         query: str,
         max_results: int = 20,
-        time_window: Optional[str] = None,  # ✅ added
+        time_window: Optional[str] = None,
 ) -> List[dict]:
-    """
-    מחפש מיילים לפי query ומוריד attachments (PDF) לתיקיית downloads_dir.
-    מחזיר רשימת dict עם מטא-דאטה לקליטה ל-DB.
-    """
     downloads_dir.mkdir(parents=True, exist_ok=True)
-
     service = build("gmail", "v1", credentials=creds)
 
-    # ✅ ONLY CHANGE: constrain query at the API call
     q = query if not time_window else f"{query} newer_than:{time_window}"
 
     resp = service.users().messages().list(
@@ -55,6 +49,7 @@ def fetch_invoice_attachments(
         q=q,
         maxResults=max_results
     ).execute()
+
     msgs = resp.get("messages", []) or []
     results: List[dict] = []
 
@@ -77,6 +72,8 @@ def fetch_invoice_attachments(
 
         payload = full.get("payload", {})
 
+        found_pdf = False  # ✅ track whether we recorded any PDF attachment
+
         for part in walk(payload):
             filename = part.get("filename") or ""
             body = part.get("body") or {}
@@ -87,6 +84,8 @@ def fetch_invoice_attachments(
 
             if not is_pdf or not att_id:
                 continue
+
+            found_pdf = True
 
             att = service.users().messages().attachments().get(
                 userId="me",
@@ -113,9 +112,7 @@ def fetch_invoice_attachments(
                         break
                     i += 1
 
-
             out_path.write_bytes(file_bytes)
-
 
             category = classify_category(subject, sender, out_path.name)
 
@@ -128,6 +125,25 @@ def fetch_invoice_attachments(
                     "msg_date": msg_date,
                     "filename": out_path.name,
                     "saved_path": f"downloads/{out_path.name}",
+                    "category": category,
+                    "amount_value": None,
+                    "amount_currency": None,
+                    "due_date_iso": None,
+                }
+            )
+
+        if not found_pdf:
+            # 📩 No PDF attachments found — still record the email
+            category = classify_category(subject, sender, None)
+            results.append(
+                {
+                    "message_id": msg_id,
+                    "attachment_id": None,
+                    "subject": subject,
+                    "sender": sender,
+                    "msg_date": msg_date,
+                    "filename": None,
+                    "saved_path": None,
                     "category": category,
                     "amount_value": None,
                     "amount_currency": None,

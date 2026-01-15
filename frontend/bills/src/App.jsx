@@ -96,7 +96,7 @@ export default function App() {
                 method: "POST",
                 credentials: "include",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ max_results: 30, time_window: timeWindow }),
+                body: JSON.stringify({ max_results: 100, time_window: timeWindow }),
             });
 
             if (res.status === 401) {
