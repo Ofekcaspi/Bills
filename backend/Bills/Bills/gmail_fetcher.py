@@ -37,6 +37,7 @@ def fetch_invoice_attachments(
         downloads_dir: Path,
         query: str,
         max_results: int = 20,
+        time_window: Optional[str] = None,  # ✅ added
 ) -> List[dict]:
     """
     מחפש מיילים לפי query ומוריד attachments (PDF) לתיקיית downloads_dir.
@@ -46,7 +47,14 @@ def fetch_invoice_attachments(
 
     service = build("gmail", "v1", credentials=creds)
 
-    resp = service.users().messages().list(userId="me", q=query, maxResults=max_results).execute()
+    # ✅ ONLY CHANGE: constrain query at the API call
+    q = query if not time_window else f"{query} newer_than:{time_window}"
+
+    resp = service.users().messages().list(
+        userId="me",
+        q=q,
+        maxResults=max_results
+    ).execute()
     msgs = resp.get("messages", []) or []
     results: List[dict] = []
 
