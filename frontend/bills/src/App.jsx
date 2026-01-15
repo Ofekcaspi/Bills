@@ -203,10 +203,34 @@ export default function App() {
 
                                 <button
                                     className="btn"
-                                    onClick={() => {
+                                    onClick={async () => {
+                                        if (!window.confirm("⚠️ This will permanently delete DB data. Continue?")) {
+                                            return;
+                                        }
+
                                         setQ("");
                                         setCategory("");
+
+                                        try {
+                                            const res = await fetch(`${API_BASE}/clean-db/`, {
+                                                method: "DELETE",
+                                            });
+
+                                            const data = await res.json();
+
+                                            if (!res.ok) {
+                                                throw new Error(data.error || "Failed to clean DB");
+                                            }
+
+                                            alert("Database cleaned successfully");
+                                            // 🔄 Refresh the page
+                                            window.location.reload();
+
+                                        } catch (err) {
+                                            alert(err.message);
+                                        }
                                     }}
+
                                 >
                                     נקה
                                 </button>

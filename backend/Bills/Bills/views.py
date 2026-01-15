@@ -9,7 +9,7 @@ from django.shortcuts import redirect
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
-
+from django.db import connection, transaction
 from .gmailConnect import GmailAuthService
 from  .models import BillDocument
 from .gmail_fetcher import fetch_invoice_attachments
@@ -112,6 +112,7 @@ def sync_gmail(request):
     updated = 0
 
     for r in rows:
+        print(r['subject'])
         obj, is_created = BillDocument.objects.get_or_create(
             message_id=r["message_id"],
             defaults={
@@ -229,3 +230,38 @@ def serve_file(request, path: str):
         open(target, "rb"),
         content_type="application/pdf",
     )
+@api_view(["DELETE"])
+def clean_db(request):
+    sql_path = Path(__file__).resolve().parent / "clean_db_script.sql"
+
+    if not sql_path.exists():
+        return Response(
+            {"error": f"SQL script not found at {sql_path}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    # Ensure we're actually using SQLite
+    if connection.vendor != "sqlite":
+        return Response(
+            {"error": f"clean_db is intended for SQLite, but current DB vendor is '{connection.vendor}'"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        sql = sql_path.read_text(encoding="utf-8")
+
+        with transaction.atomic():
+            with connection.cursor() as cursor:
+                # SQLite supports multiple statements via executescript
+                cursor.executescript(sql)
+
+        return Response(
+            {"message": "SQLite database cleaned successfully"},
+            status=status.HTTP_200_OK,
+        )
+
+    except Exception as e:
+        return Response(
+            {"error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
