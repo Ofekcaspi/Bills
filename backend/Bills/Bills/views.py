@@ -93,7 +93,7 @@ def sync_gmail(request):
             {"ok": False, "error": "not_connected"},
             status=status.HTTP_401_UNAUTHORIZED,
         )
-
+    time_window=request.data.get("time_window")
     query = request.data.get("query") or (
         'has:attachment filename:pdf (invoice OR receipt OR "חשבונית" OR "קבלה" OR "חשבונית מס" OR "Tax Invoice")'
     )
@@ -105,6 +105,7 @@ def sync_gmail(request):
         downloads_dir=settings.BILLS_DOWNLOADS_DIR,
         query=query,
         max_results=max_results,
+        time_window=time_window if time_window else None,
     )
 
     created = 0
