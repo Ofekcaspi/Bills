@@ -3,6 +3,15 @@ import "./App.css";
 
 const API_BASE = "http://127.0.0.1:8000";
 
+const TIME_WINDOW_OPTIONS = [
+    { value: "7d", label: "7 ימים" },
+    { value: "14d", label: "14 ימים" },
+    { value: "30d", label: "חודש (30 ימים)" },
+    { value: "90d", label: "3 חודשים (90 ימים)" },
+    { value: "180d", label: "6 חודשים (180 ימים)" },
+    { value: "365d", label: "שנה (365 ימים)" },
+];
+
 function money(v, cur) {
     if (v == null) return "—";
     const n = Number(v);
@@ -25,6 +34,9 @@ export default function App() {
 
     const [q, setQ] = useState("");
     const [category, setCategory] = useState("");
+
+    // ✅ time window select (like category)
+    const [timeWindow, setTimeWindow] = useState("30d");
 
     const [loading, setLoading] = useState(true);
     const [syncing, setSyncing] = useState(false);
@@ -84,7 +96,7 @@ export default function App() {
                 method: "POST",
                 credentials: "include",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ max_results: 30 }),
+                body: JSON.stringify({ max_results: 30, time_window: timeWindow }),
             });
 
             if (res.status === 401) {
@@ -170,6 +182,7 @@ export default function App() {
                                     onChange={(e) => setQ(e.target.value)}
                                     placeholder="חיפוש לפי נושא / שולח / שם קובץ…"
                                 />
+
                                 <select className="select" value={category} onChange={(e) => setCategory(e.target.value)}>
                                     <option value="">כל הקטגוריות</option>
                                     {categories.map((c) => (
@@ -178,6 +191,16 @@ export default function App() {
                                         </option>
                                     ))}
                                 </select>
+
+                                {/* ✅ Time window dropdown (like category) */}
+                                <select className="select" value={timeWindow} onChange={(e) => setTimeWindow(e.target.value)}>
+                                    {TIME_WINDOW_OPTIONS.map((t) => (
+                                        <option key={t.value} value={t.value}>
+                                            חלון זמן: {t.label}
+                                        </option>
+                                    ))}
+                                </select>
+
                                 <button
                                     className="btn"
                                     onClick={() => {
