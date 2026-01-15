@@ -77,7 +77,7 @@ def gmail_connect(request):
 # =====================================================
 # POST /sync/ – סנכרון Gmail → downloads/ + DB
 # =====================================================
-@api_view(["POST"])
+
 @api_view(["POST"])
 def sync_gmail(request):
     """
@@ -95,8 +95,9 @@ def sync_gmail(request):
         )
 
     query = request.data.get("query") or (
-        'has:attachment (filename:pdf OR "invoice" OR "receipt" OR "חשבונית" OR "קבלה")'
+        'has:attachment filename:pdf (invoice OR receipt OR "חשבונית" OR "קבלה" OR "חשבונית מס" OR "Tax Invoice")'
     )
+
     max_results = int(request.data.get("max_results") or 20)
 
     rows = fetch_invoice_attachments(

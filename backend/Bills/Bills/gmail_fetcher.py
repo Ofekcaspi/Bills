@@ -105,7 +105,9 @@ def fetch_invoice_attachments(
                         break
                     i += 1
 
+
             out_path.write_bytes(file_bytes)
+
 
             category = classify_category(subject, sender, out_path.name)
 
