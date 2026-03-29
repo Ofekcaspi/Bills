@@ -6,10 +6,12 @@ from pathlib import Path
 from typing import List, Optional
 from datetime import datetime, timezone
 
+from bs4 import BeautifulSoup
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 
 from .categorizer import classify_category
+from .pdf_analysis import analyze_pdf, analyze_text
 
 
 def _parse_rfc2822_date(s: str) -> Optional[datetime]:
@@ -29,6 +31,52 @@ def _safe_filename(name: str) -> str:
         out = out.replace(b, "_")
     out = out.strip()
     return out or "file.pdf"
+
+
+def _decode_gmail_body_data(data: str) -> str:
+    if not data:
+        return ""
+    try:
+        return base64.urlsafe_b64decode(data.encode("utf-8")).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _extract_email_body_text(payload: dict) -> str:
+    plain_parts: list[str] = []
+    html_parts: list[str] = []
+
+    def walk(part):
+        if not part:
+            return
+        yield part
+        for child in (part.get("parts") or []):
+            yield from walk(child)
+
+    for part in walk(payload):
+        mime = (part.get("mimeType") or "").lower()
+        body = part.get("body") or {}
+        data = body.get("data")
+        if not data:
+            continue
+
+        decoded = _decode_gmail_body_data(data).strip()
+        if not decoded:
+            continue
+
+        if mime.startswith("text/plain"):
+            plain_parts.append(decoded)
+        elif mime.startswith("text/html"):
+            html_parts.append(decoded)
+
+    if plain_parts:
+        return "\n".join(plain_parts).strip()
+
+    if html_parts:
+        html_text = "\n".join(html_parts)
+        return BeautifulSoup(html_text, "html.parser").get_text(" ", strip=True)
+
+    return ""
 
 
 def fetch_invoice_attachments(
@@ -71,6 +119,11 @@ def fetch_invoice_attachments(
         msg_date = _parse_rfc2822_date(date_raw) if date_raw else None
 
         payload = full.get("payload", {})
+        email_body_text = _extract_email_body_text(payload)
+        body_analysis = analyze_text(
+            email_body_text,
+            source_label=f"email body {msg_id}",
+        )
 
         found_pdf = False  # ✅ track whether we recorded any PDF attachment
 
@@ -109,10 +162,23 @@ def fetch_invoice_attachments(
                     cand = downloads_dir / f"{stem}_{i}{suf}"
                     if not cand.exists():
                         out_path = cand
+
                         break
                     i += 1
 
             out_path.write_bytes(file_bytes)
+            analysis = analyze_pdf(out_path)
+            amount_value = analysis.get("amount_value")
+            amount_currency = analysis.get("amount_currency")
+            due_date_iso = analysis.get("due_date_iso")
+
+            if amount_value is None:
+                amount_value = body_analysis.get("amount_value")
+            if not amount_currency:
+                amount_currency = body_analysis.get("amount_currency")
+            if not due_date_iso:
+                due_date_iso = body_analysis.get("due_date_iso")
+
 
             category = classify_category(subject, sender, out_path.name)
 
@@ -126,9 +192,9 @@ def fetch_invoice_attachments(
                     "filename": out_path.name,
                     "saved_path": f"downloads/{out_path.name}",
                     "category": category,
-                    "amount_value": None,
-                    "amount_currency": None,
-                    "due_date_iso": None,
+                    "amount_value": amount_value,
+                    "amount_currency": amount_currency,
+                    "due_date_iso": due_date_iso,
                 }
             )
 
@@ -145,9 +211,9 @@ def fetch_invoice_attachments(
                     "filename": None,
                     "saved_path": None,
                     "category": category,
-                    "amount_value": None,
-                    "amount_currency": None,
-                    "due_date_iso": None,
+                    "amount_value": body_analysis.get("amount_value"),
+                    "amount_currency": body_analysis.get("amount_currency"),
+                    "due_date_iso": body_analysis.get("due_date_iso"),
                 }
             )
 

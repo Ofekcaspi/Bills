@@ -134,14 +134,29 @@ def sync_gmail(request):
         else:
             # עדכון רק אם חסר
             changed = False
+            update_fields = []
             if not obj.category and r.get("category"):
                 obj.category = r["category"]
                 changed = True
+                update_fields.append("category")
             if not obj.saved_path and r.get("saved_path"):
                 obj.saved_path = r["saved_path"]
                 changed = True
+                update_fields.append("saved_path")
+            if obj.amount_value is None and r.get("amount_value") is not None:
+                obj.amount_value = r["amount_value"]
+                changed = True
+                update_fields.append("amount_value")
+            if not obj.amount_currency and r.get("amount_currency"):
+                obj.amount_currency = r["amount_currency"]
+                changed = True
+                update_fields.append("amount_currency")
+            if not obj.due_date_iso and r.get("due_date_iso"):
+                obj.due_date_iso = r["due_date_iso"]
+                changed = True
+                update_fields.append("due_date_iso")
             if changed:
-                obj.save(update_fields=["category", "saved_path"])
+                obj.save(update_fields=update_fields)
                 updated += 1
 
     return Response(
