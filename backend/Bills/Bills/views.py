@@ -159,7 +159,7 @@ def bills_list(request):
     GET /bills/
     מחזיר רשימת חשבוניות בפורמט שהפרונט מצפה
     """
-    qs = BillDocument.objects.order_by("-id")[:1000]
+    qs = BillDocument.objects.order_by("-msg_date", "-id")[:1000]
     items = [b.to_dict() for b in qs]
     return Response({"items": items}, status=status.HTTP_200_OK)
 

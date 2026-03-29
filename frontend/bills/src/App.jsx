@@ -19,6 +19,13 @@ function money(v, cur) {
     return `${n.toFixed(2)} ${cur || ""}`.trim();
 }
 
+function formatReceivedDate(value) {
+    if (!value) return "ג€”";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleDateString("he-IL");
+}
+
 function fileUrlFromSavedPath(saved_path) {
     if (!saved_path) return "";
     // Normalize windows path -> url path
@@ -262,10 +269,12 @@ export default function App() {
                                         <th>סכום</th>
                                         <th>תאריך יעד</th>
                                         <th>קובץ</th>
+                                        <th>תאריך קבלה</th>
                                     </tr>
                                     </thead>
                                     <tbody>
                                     {filtered.map((x) => {
+                                        const receivedDate = formatReceivedDate(x.msg_date);
                                         const url = fileUrlFromSavedPath(x.saved_path);
                                         const due = x.due_date_iso || "—";
                                         const dueSoon = x.due_date_iso && upcoming?.items?.some((u) => u.id === x.id);
@@ -286,6 +295,7 @@ export default function App() {
                                                         "—"
                                                     )}
                                                 </td>
+                                                <td className="nowrap">{receivedDate}</td>
                                             </tr>
                                         );
                                     })}
