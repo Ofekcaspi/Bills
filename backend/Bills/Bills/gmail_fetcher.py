@@ -12,6 +12,7 @@ from google.oauth2.credentials import Credentials
 
 from .categorizer import classify_category
 from .pdf_analysis import analyze_pdf, analyze_text
+from .Financial_vs_general_Classifier import get_financial_vs_general_classifier
 
 
 def _parse_rfc2822_date(s: str) -> Optional[datetime]:
@@ -31,6 +32,20 @@ def _safe_filename(name: str) -> str:
         out = out.replace(b, "_")
     out = out.strip()
     return out or "file.pdf"
+
+
+def _make_unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+
+    stem = path.stem
+    suf = path.suffix
+    i = 2
+    while True:
+        cand = path.parent / f"{stem}_{i}{suf}"
+        if not cand.exists():
+            return cand
+        i += 1
 
 
 def _decode_gmail_body_data(data: str) -> str:
@@ -89,6 +104,7 @@ def fetch_invoice_attachments(
 ) -> List[dict]:
     downloads_dir.mkdir(parents=True, exist_ok=True)
     service = build("gmail", "v1", credentials=creds)
+    financial_vs_general = get_financial_vs_general_classifier()
 
     q = query if not time_window else f"{query} newer_than:{time_window}"
 
@@ -120,12 +136,13 @@ def fetch_invoice_attachments(
 
         payload = full.get("payload", {})
         email_body_text = _extract_email_body_text(payload)
+
         body_analysis = analyze_text(
             email_body_text,
             source_label=f"email body {msg_id}",
         )
 
-        found_pdf = False  # ✅ track whether we recorded any PDF attachment
+        found_pdf = False
 
         for part in walk(payload):
             filename = part.get("filename") or ""
@@ -152,21 +169,13 @@ def fetch_invoice_attachments(
 
             file_bytes = base64.urlsafe_b64decode(data.encode("utf-8"))
             safe = _safe_filename(filename or f"{msg_id}.pdf")
-            out_path = downloads_dir / safe
-
-            if out_path.exists():
-                stem = out_path.stem
-                suf = out_path.suffix
-                i = 2
-                while True:
-                    cand = downloads_dir / f"{stem}_{i}{suf}"
-                    if not cand.exists():
-                        out_path = cand
-
-                        break
-                    i += 1
-
+            out_path = _make_unique_path(downloads_dir / safe)
             out_path.write_bytes(file_bytes)
+
+            prediction, _ = financial_vs_general.classify_file(out_path)
+            if prediction != "financial":
+                continue
+
             analysis = analyze_pdf(out_path)
             amount_value = analysis.get("amount_value")
             amount_currency = analysis.get("amount_currency")
@@ -178,7 +187,6 @@ def fetch_invoice_attachments(
                 amount_currency = body_analysis.get("amount_currency")
             if not due_date_iso:
                 due_date_iso = body_analysis.get("due_date_iso")
-
 
             category = classify_category(subject, sender, out_path.name)
 
@@ -199,8 +207,16 @@ def fetch_invoice_attachments(
             )
 
         if not found_pdf:
-            # 📩 No PDF attachments found — still record the email
-            category = classify_category(subject, sender, None)
+            safe = _safe_filename(f"{msg_id}_body.txt")
+            out_path = _make_unique_path(downloads_dir / safe)
+            out_path.write_text(email_body_text or "", encoding="utf-8")
+
+            prediction, _ = financial_vs_general.classify_text(email_body_text or "")
+            if prediction != "financial":
+                continue
+
+            category = classify_category(subject, sender, out_path.name)
+
             results.append(
                 {
                     "message_id": msg_id,
@@ -208,8 +224,8 @@ def fetch_invoice_attachments(
                     "subject": subject,
                     "sender": sender,
                     "msg_date": msg_date,
-                    "filename": None,
-                    "saved_path": None,
+                    "filename": out_path.name,
+                    "saved_path": f"downloads/{out_path.name}",
                     "category": category,
                     "amount_value": body_analysis.get("amount_value"),
                     "amount_currency": body_analysis.get("amount_currency"),
