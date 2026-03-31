@@ -19,15 +19,20 @@ def pdf_words_to_list(pdf_path: Path):
             for word_data in page_words:
                 if "text" in word_data:
                     # kept as in your original code, for Hebrew PDFs
-                    words.append(word_data["text"])
-    print(words)
+                    words.append(word_data["text"][::-1])
+    print('pdf: ',words[:10])
     return words
 
 
 def txt_words_to_list(txt_path: Path):
     text = txt_path.read_text(encoding="utf-8", errors="replace")
-    print(text)
-    return text.split()
+
+    words = text.split()
+
+    # reverse each word (Hebrew fix)
+
+    print('text: ',words[:10])
+    return words
 
 
 def clean_words(words):
@@ -178,10 +183,11 @@ def load_or_train_classifier(model_path: Path, folders):
 
 # classifier = load_or_train_classifier(MODEL_PATH, FOLDERS)
 def get_financial_vs_general_classifier():
-    model_path = Path.cwd() /'Bills' / "financial_vs_general_trained_params.pkl"
+    model_path = Path.cwd() /'Bills' /"financial_vs_general_trained_params.pkl"
+    print(model_path)
     folders = {
-        "general": Path.cwd() / "Bills" / "BillClassification" / "training_data" / "financial_vs_general" / "general",
-        "financial": Path.cwd() / "Bills" / "BillClassification" / "training_data" / "financial_vs_general" / "financial",
+        "general": Path.cwd() /'Bills'/ "BillClassification" / "training_data" / "financial_vs_general" / "general",
+        "financial": Path.cwd() /'Bills' / "BillClassification" / "training_data" / "financial_vs_general" / "financial",
     }
     return load_or_train_classifier(model_path, folders)
 

@@ -95,7 +95,7 @@ def sync_gmail(request):
         )
     time_window=request.data.get("time_window")
     query = request.data.get("query") or (
-        '(invoice OR receipt OR "חשבונית" OR "קבלה" OR "חשבונית מס" OR "Tax Invoice")'
+        '(invoice OR receipt OR "חשבונית" OR "קבלה" OR "Order" OR "הזמנה" OR "חשבונית מס" OR "Tax Invoice")'
     )
 
     max_results = int(request.data.get("max_results") or 20)
@@ -241,9 +241,13 @@ def serve_file(request, path: str):
     if not str(target).startswith(str(base)) or not target.exists():
         raise Http404("File not found")
 
+    content_type = "application/pdf"
+    if target.suffix.lower() == ".txt":
+        content_type = "text/plain; charset=utf-8"
+
     return FileResponse(
         open(target, "rb"),
-        content_type="application/pdf",
+        content_type=content_type,
     )
 @api_view(["DELETE"])
 def clean_db(request):
