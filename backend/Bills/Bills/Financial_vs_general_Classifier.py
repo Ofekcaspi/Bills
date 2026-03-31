@@ -19,13 +19,14 @@ def pdf_words_to_list(pdf_path: Path):
             for word_data in page_words:
                 if "text" in word_data:
                     # kept as in your original code, for Hebrew PDFs
-                    words.append(word_data["text"][::-1])
-
+                    words.append(word_data["text"])
+    print(words)
     return words
 
 
 def txt_words_to_list(txt_path: Path):
     text = txt_path.read_text(encoding="utf-8", errors="replace")
+    print(text)
     return text.split()
 
 
@@ -175,29 +176,12 @@ def load_or_train_classifier(model_path: Path, folders):
     print("Model saved to", model_path)
     return classifier
 
+# classifier = load_or_train_classifier(MODEL_PATH, FOLDERS)
+def get_financial_vs_general_classifier():
+    model_path = Path.cwd() /'Bills' / "financial_vs_general_trained_params.pkl"
+    folders = {
+        "general": Path.cwd() / "Bills" / "BillClassification" / "training_data" / "financial_vs_general" / "general",
+        "financial": Path.cwd() / "Bills" / "BillClassification" / "training_data" / "financial_vs_general" / "financial",
+    }
+    return load_or_train_classifier(model_path, folders)
 
-# =========================
-# Paths
-# =========================
-GENERAL_PATH = Path.cwd() / "BillClassification" / "training_data" / "financial_vs_general" / "general"
-FINANCIAL_PATH = Path.cwd() / "BillClassification" / "training_data" / "financial_vs_general" / "financial"
-MODEL_PATH = Path.cwd() / "financial_vs_general_trained_params.pkl"
-
-FOLDERS = {
-    "general": GENERAL_PATH,
-    "financial": FINANCIAL_PATH,
-}
-
-classifier = load_or_train_classifier(MODEL_PATH, FOLDERS)
-
-# =========================
-# Test on a file
-# Can be .pdf or .txt
-# =========================
-TEST_FILE = Path.cwd() / "test.txt"
-# TEST_FILE = Path.cwd() / "some_email_body.txt"
-
-prediction, log_probs = classifier.classify_file(TEST_FILE)
-
-print("Prediction:", prediction)
-print("Log probabilities:", log_probs)
