@@ -16,15 +16,15 @@ def pdf_words_to_list(pdf_path: Path):
             for word_data in page_words:
                 if "text" in word_data:
                     # kept as in your original code, for Hebrew PDFs
-                    words.append(word_data["text"][::-1])
-    print('pdf: ',words[:10])
+                    words.append(word_data["text"])
+            print('pdf: ', words[:10])
     return words
 
 
 def txt_words_to_list(txt_path: Path):
     text = txt_path.read_text(encoding="utf-8", errors="replace")
-    words = text.split()
-    print('text: ',words[:10])
+    words = [w[::-1] for w in text.split()]
+    print('txt: ', words[:10])
     return words
 
 
@@ -32,13 +32,28 @@ def clean_words(words):
     cleaned = []
 
     for word in words:
-        word = word.strip().lower()
+        original = word.strip()
+
+        if not original:
+            continue
+
+        # 🔹 normalize emails
+        if re.fullmatch(r"[\w\.-]+@[\w\.-]+\.\w+", original):
+            cleaned.append("<email>")
+            continue
+
+        # 🔹 normalize numbers (amounts, ids, etc.)
+        if re.fullmatch(r"\d+", original):
+            cleaned.append("<number>")
+            continue
+
+        # 🔹 lowercase
+        word = original.lower()
+
+        # 🔹 remove unwanted chars (keep Hebrew + letters + digits)
         word = re.sub(r"[^\w\u0590-\u05FF]", "", word)
 
         if not word:
-            continue
-
-        if re.fullmatch(r"\d+", word):
             continue
 
         cleaned.append(word)
@@ -183,4 +198,3 @@ def get_financial_vs_general_classifier():
         "financial": Path.cwd() /'Bills' / "BillClassification" / "training_data" / "financial_vs_general" / "financial",
     }
     return load_or_train_classifier(model_path, folders)
-
