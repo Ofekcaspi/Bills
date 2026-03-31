@@ -142,95 +142,100 @@ def fetch_invoice_attachments(
             source_label=f"email body {msg_id}",
         )
 
-        found_pdf = False
+        pdf_parts = []
 
         for part in walk(payload):
             filename = part.get("filename") or ""
             body = part.get("body") or {}
             att_id = body.get("attachmentId")
-
             mime = part.get("mimeType") or ""
+
             is_pdf = (mime == "application/pdf") or filename.lower().endswith(".pdf")
 
-            if not is_pdf or not att_id:
-                continue
+            if is_pdf and att_id:
+                pdf_parts.append((part, filename, att_id, mime))
 
-            found_pdf = True
+        # Case 1: email has PDF(s) -> use PDF only
+        if pdf_parts:
+            for part, filename, att_id, mime in pdf_parts:
+                att = service.users().messages().attachments().get(
+                    userId="me",
+                    messageId=msg_id,
+                    id=att_id,
+                ).execute()
 
-            att = service.users().messages().attachments().get(
-                userId="me",
-                messageId=msg_id,
-                id=att_id,
-            ).execute()
+                data = att.get("data")
+                if not data:
+                    continue
 
-            data = att.get("data")
-            if not data:
-                continue
+                file_bytes = base64.urlsafe_b64decode(data.encode("utf-8"))
+                safe = _safe_filename(filename or f"{msg_id}.pdf")
+                out_path = _make_unique_path(downloads_dir / safe)
+                out_path.write_bytes(file_bytes)
 
-            file_bytes = base64.urlsafe_b64decode(data.encode("utf-8"))
-            safe = _safe_filename(filename or f"{msg_id}.pdf")
-            out_path = _make_unique_path(downloads_dir / safe)
-            out_path.write_bytes(file_bytes)
+                prediction, _ = financial_vs_general.classify_file(out_path)
+                if prediction != "financial":
+                    continue
 
-            prediction, _ = financial_vs_general.classify_file(out_path)
-            if prediction != "financial":
-                continue
+                analysis = analyze_pdf(out_path)
+                amount_value = analysis.get("amount_value")
+                amount_currency = analysis.get("amount_currency")
+                due_date_iso = analysis.get("due_date_iso")
 
-            analysis = analyze_pdf(out_path)
-            amount_value = analysis.get("amount_value")
-            amount_currency = analysis.get("amount_currency")
-            due_date_iso = analysis.get("due_date_iso")
+                if amount_value is None:
+                    amount_value = body_analysis.get("amount_value")
+                if not amount_currency:
+                    amount_currency = body_analysis.get("amount_currency")
+                if not due_date_iso:
+                    due_date_iso = body_analysis.get("due_date_iso")
 
-            if amount_value is None:
-                amount_value = body_analysis.get("amount_value")
-            if not amount_currency:
-                amount_currency = body_analysis.get("amount_currency")
-            if not due_date_iso:
-                due_date_iso = body_analysis.get("due_date_iso")
+                category = classify_category(subject, sender, out_path.name)
 
-            category = classify_category(subject, sender, out_path.name)
+                results.append(
+                    {
+                        "message_id": msg_id,
+                        "attachment_id": att_id,
+                        "subject": subject,
+                        "sender": sender,
+                        "msg_date": msg_date,
+                        "filename": out_path.name,
+                        "saved_path": f"downloads/{out_path.name}",
+                        "category": category,
+                        "amount_value": amount_value,
+                        "amount_currency": amount_currency,
+                        "due_date_iso": due_date_iso,
+                    }
+                )
 
-            results.append(
-                {
-                    "message_id": msg_id,
-                    "attachment_id": att_id,
-                    "subject": subject,
-                    "sender": sender,
-                    "msg_date": msg_date,
-                    "filename": out_path.name,
-                    "saved_path": f"downloads/{out_path.name}",
-                    "category": category,
-                    "amount_value": amount_value,
-                    "amount_currency": amount_currency,
-                    "due_date_iso": due_date_iso,
-                }
-            )
+            # important: if PDFs existed but none were financial, discard message
+            continue
 
-        if not found_pdf:
-            safe = _safe_filename(f"{msg_id}_body.txt")
-            out_path = _make_unique_path(downloads_dir / safe)
-            out_path.write_text(email_body_text or "", encoding="utf-8")
+        # Case 2: no PDF exists -> use body text
+        prediction, _ = financial_vs_general.classify_text(email_body_text or "")
+        print('pred: ',prediction)
+        if prediction != "financial":
+            continue
 
-            prediction, _ = financial_vs_general.classify_text(email_body_text or "")
-            if prediction != "financial":
-                continue
+        safe = _safe_filename(f"{msg_id}_body.txt")
+        out_path = _make_unique_path(downloads_dir / safe)
+        out_path.write_text(email_body_text or "", encoding="utf-8")
 
-            category = classify_category(subject, sender, out_path.name)
+        category = classify_category(subject, sender, out_path.name)
 
-            results.append(
-                {
-                    "message_id": msg_id,
-                    "attachment_id": None,
-                    "subject": subject,
-                    "sender": sender,
-                    "msg_date": msg_date,
-                    "filename": out_path.name,
-                    "saved_path": f"downloads/{out_path.name}",
-                    "category": category,
-                    "amount_value": body_analysis.get("amount_value"),
-                    "amount_currency": body_analysis.get("amount_currency"),
-                    "due_date_iso": body_analysis.get("due_date_iso"),
-                }
-            )
+        results.append(
+            {
+                "message_id": msg_id,
+                "attachment_id": None,
+                "subject": subject,
+                "sender": sender,
+                "msg_date": msg_date,
+                "filename": out_path.name,
+                "saved_path": f"downloads/{out_path.name}",
+                "category": category,
+                "amount_value": body_analysis.get("amount_value"),
+                "amount_currency": body_analysis.get("amount_currency"),
+                "due_date_iso": body_analysis.get("due_date_iso"),
+            }
+        )
 
     return results

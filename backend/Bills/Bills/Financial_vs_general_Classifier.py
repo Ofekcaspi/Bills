@@ -3,10 +3,7 @@ import pickle
 import re
 from collections import Counter
 from pathlib import Path
-
 import pdfplumber
-
-
 def pdf_words_to_list(pdf_path: Path):
     words = []
 
@@ -26,11 +23,7 @@ def pdf_words_to_list(pdf_path: Path):
 
 def txt_words_to_list(txt_path: Path):
     text = txt_path.read_text(encoding="utf-8", errors="replace")
-
     words = text.split()
-
-    # reverse each word (Hebrew fix)
-
     print('text: ',words[:10])
     return words
 
@@ -57,7 +50,7 @@ def extract_words_from_pdf(pdf_path: Path):
     return clean_words(pdf_words_to_list(pdf_path))
 
 
-def extract_words_from_txt(txt_path: Path):
+def extract_words_from_txt(txt_path=''):
     return clean_words(txt_words_to_list(txt_path))
 
 
@@ -121,7 +114,7 @@ class SimpleBayesClassifier:
         self.total_documents += doc_count
 
     def classify_text(self, text: str):
-        words = clean_words(re.findall(r"[\w\u0590-\u05FF]+", text.lower()))
+        words = clean_words(text.split())
         return self._classify_words(words)
 
     def classify_file(self, file_path: Path):
