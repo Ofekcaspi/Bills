@@ -355,17 +355,7 @@ def extract_text_from_pdf(path: str | Path) -> str:
         return ""
 
     text = "\n".join(t for t in page_texts if t).strip()
-    printable_text = _reverse_text_for_print(text) if text else ""
 
-    print()
-    print("=" * 80)
-    print(f"[PDF_ANALYSIS] extracted text from {pdf_path.name}:")
-    if text:
-        print(printable_text)
-    else:
-        print("[PDF_ANALYSIS] no extractable text found (non-OCR mode)")
-    print("=" * 80)
-    print()
 
     return text
 
@@ -398,10 +388,7 @@ def analyze_text(text: str, *, source_label: str = "text") -> dict:
     amount_currency = primary.get("amount_currency") or secondary.get("amount_currency")
     due_date_iso = primary.get("due_date_iso") or secondary.get("due_date_iso")
 
-    print(
-        f"[TEXT_ANALYSIS] parsed fields from {source_label}: "
-        f"amount_value={amount_value}, amount_currency={amount_currency}, due_date_iso={due_date_iso}"
-    )
+
 
     return {
         "text": cleaned_text,

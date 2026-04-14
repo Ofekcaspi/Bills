@@ -104,6 +104,20 @@ body {
   font-size: 0.95rem;
 }
 
+.topbarInner .eyebrow,
+.topbarInner .title,
+.topbarInner .subtitle {
+  display: none;
+}
+
+.projectTitle {
+  margin: 0;
+  font-family: "Space Grotesk", "Assistant", sans-serif;
+  font-size: clamp(1.25rem, 2.4vw, 2.05rem);
+  line-height: 1.15;
+  font-weight: 700;
+}
+
 .topActions {
   display: flex;
   align-items: center;
