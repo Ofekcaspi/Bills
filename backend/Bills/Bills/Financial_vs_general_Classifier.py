@@ -4,6 +4,21 @@ import re
 from collections import Counter
 from pathlib import Path
 import pdfplumber
+
+
+IGNORED_UNICODE_CHARS_PATTERN = re.compile(r"[\u200c\u200e\u200f\u202a-\u202e\u2066-\u2069\ufe0f]")
+
+
+def _strip_invalid_chars(text: str) -> str:
+    if not text:
+        return ""
+    sanitized = text.replace("\u00a0", " ")
+    sanitized = IGNORED_UNICODE_CHARS_PATTERN.sub("", sanitized)
+    # Drop non-BMP symbols (e.g. emoji) so they can't break console encoding.
+    sanitized = "".join(ch for ch in sanitized if ord(ch) <= 0xFFFF)
+    return sanitized
+
+
 def pdf_words_to_list(pdf_path: Path):
     words = []
 
@@ -17,22 +32,25 @@ def pdf_words_to_list(pdf_path: Path):
                 if "text" in word_data:
                     # kept as in your original code, for Hebrew PDFs
                     words.append(word_data["text"])
-            print('pdf: ', words[:10])
     return words
 
 
 def txt_words_to_list(txt_path: Path):
-    text = txt_path.read_text(encoding="utf-8", errors="replace")
+    text = _strip_invalid_chars(txt_path.read_text(encoding="utf-8", errors="replace"))
     words = [w[::-1] for w in text.split()]
-    print('txt: ', words[:10])
     return words
+
+
+def text_words_to_list(text: str):
+    normalized = _strip_invalid_chars(text or "")
+    return [w[::-1] for w in normalized.split()]
 
 
 def clean_words(words):
     cleaned = []
 
     for word in words:
-        original = word.strip()
+        original = _strip_invalid_chars(word).strip()
 
         if not original:
             continue
@@ -129,7 +147,8 @@ class SimpleBayesClassifier:
         self.total_documents += doc_count
 
     def classify_text(self, text: str):
-        words = clean_words(text.split())
+        # Keep text preprocessing consistent with TXT training data.
+        words = clean_words(text_words_to_list(text))
         return self._classify_words(words)
 
     def classify_file(self, file_path: Path):

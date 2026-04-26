@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import email.utils
+import re
 from pathlib import Path
 from typing import List, Optional
 from datetime import datetime, timezone
@@ -48,16 +49,43 @@ def _make_unique_path(path: Path) -> Path:
         i += 1
 
 
-def _decode_gmail_body_data(data: str) -> str:
+def _extract_part_charset(part: dict) -> Optional[str]:
+    for header in (part.get("headers") or []):
+        if (header.get("name") or "").lower() != "content-type":
+            continue
+        value = header.get("value") or ""
+        match = re.search(r"charset\s*=\s*['\"]?([^\s;\"']+)", value, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _decode_gmail_body_data(data: str, *, charset: Optional[str] = None) -> str:
     if not data:
         return ""
     try:
-        return base64.urlsafe_b64decode(data.encode("utf-8")).decode("utf-8", errors="replace")
+        raw = base64.urlsafe_b64decode(data.encode("utf-8"))
     except Exception:
         return ""
 
+    charsets = [charset, "utf-8", "windows-1255", "iso-8859-8", "latin-1"]
+    seen: set[str] = set()
+    for cs in charsets:
+        if not cs:
+            continue
+        normalized = cs.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            return raw.decode(normalized)
+        except Exception:
+            continue
 
-def _extract_email_body_text(payload: dict) -> str:
+    return raw.decode("utf-8", errors="replace")
+
+
+def _extract_email_body_text(service, msg_id: str, payload: dict) -> str:
     plain_parts: list[str] = []
     html_parts: list[str] = []
 
@@ -72,10 +100,22 @@ def _extract_email_body_text(payload: dict) -> str:
         mime = (part.get("mimeType") or "").lower()
         body = part.get("body") or {}
         data = body.get("data")
+        if not data and body.get("attachmentId") and (
+            mime.startswith("text/plain") or mime.startswith("text/html")
+        ):
+            try:
+                att = service.users().messages().attachments().get(
+                    userId="me",
+                    messageId=msg_id,
+                    id=body["attachmentId"],
+                ).execute()
+                data = att.get("data")
+            except Exception:
+                data = None
         if not data:
             continue
 
-        decoded = _decode_gmail_body_data(data).strip()
+        decoded = _decode_gmail_body_data(data, charset=_extract_part_charset(part)).strip()
         if not decoded:
             continue
 
@@ -107,14 +147,26 @@ def fetch_invoice_attachments(
     financial_vs_general = get_financial_vs_general_classifier()
 
     q = query if not time_window else f"{query} newer_than:{time_window}"
+    page_size = max(1, min(int(max_results or 20), 500))
+    msgs: List[dict] = []
+    page_token: Optional[str] = None
 
-    resp = service.users().messages().list(
-        userId="me",
-        q=q,
-        maxResults=max_results
-    ).execute()
+    while True:
+        list_kwargs = {
+            "userId": "me",
+            "q": q,
+            "maxResults": page_size,
+        }
+        if page_token:
+            list_kwargs["pageToken"] = page_token
 
-    msgs = resp.get("messages", []) or []
+        resp = service.users().messages().list(**list_kwargs).execute()
+        msgs.extend(resp.get("messages", []) or [])
+
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+
     results: List[dict] = []
 
     def walk(p):
@@ -135,7 +187,7 @@ def fetch_invoice_attachments(
         msg_date = _parse_rfc2822_date(date_raw) if date_raw else None
 
         payload = full.get("payload", {})
-        email_body_text = _extract_email_body_text(payload)
+        email_body_text = _extract_email_body_text(service, msg_id, payload)
 
         body_analysis = analyze_text(
             email_body_text,
@@ -155,7 +207,8 @@ def fetch_invoice_attachments(
             if is_pdf and att_id:
                 pdf_parts.append((part, filename, att_id, mime))
 
-        # Case 1: email has PDF(s) -> use PDF only
+        has_financial_pdf = False
+        # Case 1: email has PDF(s)
         if pdf_parts:
             for part, filename, att_id, mime in pdf_parts:
                 att = service.users().messages().attachments().get(
@@ -189,6 +242,9 @@ def fetch_invoice_attachments(
                 if not due_date_iso:
                     due_date_iso = body_analysis.get("due_date_iso")
 
+                if amount_value is None:
+                    continue
+
                 category = classify_category(subject, sender, out_path.name)
 
                 results.append(
@@ -206,14 +262,19 @@ def fetch_invoice_attachments(
                         "due_date_iso": due_date_iso,
                     }
                 )
+                has_financial_pdf = True
 
-            # important: if PDFs existed but none were financial, discard message
-            continue
+            # If at least one PDF is financial with amount, keep PDF path as source of truth.
+            if has_financial_pdf:
+                continue
 
-        # Case 2: no PDF exists -> use body text
+        # Case 2: no PDFs OR PDFs were not financial -> fallback to body text
         prediction, _ = financial_vs_general.classify_text(email_body_text or "")
         print('pred: ',prediction)
         if prediction != "financial":
+            continue
+
+        if body_analysis.get("amount_value") is None:
             continue
 
         safe = _safe_filename(f"{msg_id}_body.txt")

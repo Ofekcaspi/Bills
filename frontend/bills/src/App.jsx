@@ -292,7 +292,6 @@ export default function App() {
 
     useEffect(() => {
         loadDashboard();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     const normalizedItems = useMemo(() => {
@@ -397,10 +396,15 @@ export default function App() {
         };
     }, [filteredItems, summary]);
 
+    const monthlySourceItems = useMemo(() => {
+        if (category === "all") return normalizedItems;
+        return normalizedItems.filter((item) => item.category === category);
+    }, [normalizedItems, category]);
+
     const monthlySeries = useMemo(() => {
         const totals = new Map();
 
-        normalizedItems.forEach((item) => {
+        monthlySourceItems.forEach((item) => {
             if (item.amount === null) return;
             const anchor = item.msgDate || item.dueDate;
             if (!anchor) return;
@@ -416,12 +420,57 @@ export default function App() {
             label: monthLabel(key),
             total: totals.get(key) || 0,
         }));
-    }, [normalizedItems]);
+    }, [monthlySourceItems]);
 
     const maxChartValue = useMemo(() => {
         if (!monthlySeries.length) return 0;
         return monthlySeries.reduce((max, bucket) => Math.max(max, bucket.total), 0);
     }, [monthlySeries]);
+
+    const chartPoints = useMemo(() => {
+        if (!monthlySeries.length) {
+            return [];
+        }
+
+        const maxValue = maxChartValue || 1;
+        const minX = 6;
+        const maxX = 94;
+        const minY = 12;
+        const maxY = 88;
+        const spanX = maxX - minX;
+        const spanY = maxY - minY;
+
+        return monthlySeries.map((bucket, index) => {
+            const x =
+                monthlySeries.length === 1
+                    ? 50
+                    : maxX - (index / (monthlySeries.length - 1)) * spanX;
+            const ratio = Math.max(0, Math.min(1, bucket.total / maxValue));
+            const y = maxY - ratio * spanY;
+
+            return { ...bucket, x, y };
+        });
+    }, [monthlySeries, maxChartValue]);
+
+    const chartLinePath = useMemo(() => {
+        if (!chartPoints.length) return "";
+        return chartPoints
+            .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`)
+            .join(" ");
+    }, [chartPoints]);
+
+    const chartAreaPath = useMemo(() => {
+        if (!chartPoints.length) return "";
+        const first = chartPoints[0];
+        const last = chartPoints[chartPoints.length - 1];
+        return `${chartLinePath} L ${last.x} 88 L ${first.x} 88 Z`;
+    }, [chartPoints, chartLinePath]);
+
+    useEffect(() => {
+        if (!monthFilter) return;
+        if (monthlySeries.some((bucket) => bucket.key === monthFilter)) return;
+        setMonthFilter("");
+    }, [monthlySeries, monthFilter]);
 
     const alerts = useMemo(() => {
         const results = [];
@@ -712,26 +761,50 @@ export default function App() {
                                 {monthlySeries.length === 0 && <div className="emptyState">אין מספיק נתונים להצגת גרף.</div>}
 
                                 {monthlySeries.length > 0 && (
-                                    <div className="chartBars">
-                                        {monthlySeries.map((bucket) => {
-                                            const height = maxChartValue ? Math.max(12, (bucket.total / maxChartValue) * 100) : 12;
-                                            const active = monthFilter === bucket.key;
+                                    <div className="lineChart">
+                                        <div className="lineChartCanvas">
+                                            <svg className="lineChartSvg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                                                {[12, 31, 50, 69, 88].map((y) => (
+                                                    <line key={y} x1="6" y1={y} x2="94" y2={y} className="lineChartGrid" />
+                                                ))}
+                                                <path d={chartAreaPath} className="lineChartArea" />
+                                                <path d={chartLinePath} className="lineChartStroke" />
+                                            </svg>
 
-                                            return (
-                                                <button
-                                                    key={bucket.key}
-                                                    className={`barButton ${active ? "active" : ""}`}
-                                                    onClick={() => setMonthFilter((prev) => (prev === bucket.key ? "" : bucket.key))}
-                                                    title={`${bucket.label}: ${money(bucket.total, "₪")}`}
-                                                >
-                                                    <span className="barValue">{money(bucket.total, "₪")}</span>
-                                                    <span className="barTrack">
-                                                        <span className="barFill" style={{ height: `${height}%` }} />
-                                                    </span>
-                                                    <span className="barLabel">{bucket.label}</span>
-                                                </button>
-                                            );
-                                        })}
+                                            <div className="lineChartPoints">
+                                                {chartPoints.map((point) => {
+                                                    const active = monthFilter === point.key;
+
+                                                    return (
+                                                        <button
+                                                            key={point.key}
+                                                            className={`lineChartPoint ${active ? "active" : ""}`}
+                                                            onClick={() => setMonthFilter((prev) => (prev === point.key ? "" : point.key))}
+                                                            style={{ left: `${point.x}%`, top: `${point.y}%` }}
+                                                            title={`${point.label}: ${money(point.total)}`}
+                                                            aria-label={`${point.label}: ${money(point.total)}`}
+                                                        />
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+
+                                        <div className="lineChartLegend">
+                                            {chartPoints.map((point) => {
+                                                const active = monthFilter === point.key;
+
+                                                return (
+                                                    <button
+                                                        key={point.key}
+                                                        className={`lineChartLegendButton ${active ? "active" : ""}`}
+                                                        onClick={() => setMonthFilter((prev) => (prev === point.key ? "" : point.key))}
+                                                    >
+                                                        <span>{point.label}</span>
+                                                        <strong>{money(point.total)}</strong>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
                                     </div>
                                 )}
                             </article>
