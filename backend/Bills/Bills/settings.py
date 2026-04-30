@@ -18,7 +18,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 GMAIL_CREDENTIALS_PATH = BASE_DIR / "credentials.json"
 GMAIL_TOKEN_PATH = BASE_DIR / "token.json"
 BILLS_DOWNLOADS_DIR = BASE_DIR / "downloads"
-
+GMAIL_TOKENS_DIR = BASE_DIR / "gmail_tokens"
 # Must match exactly the URL you expose in Google Cloud Console OAuth redirect URIs:
 GMAIL_REDIRECT_URI = "http://127.0.0.1:8000/connect-email"
 

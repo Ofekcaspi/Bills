@@ -1,9 +1,7 @@
 from __future__ import annotations
-
 import re
 from datetime import date
 from pathlib import Path
-
 import pdfplumber
 
 HEBREW_WORD_PATTERN = re.compile(r"[\u0590-\u05FF]+")

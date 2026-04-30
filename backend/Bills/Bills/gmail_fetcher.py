@@ -5,7 +5,7 @@ import email.utils
 import re
 from pathlib import Path
 from typing import List, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone,timedelta
 
 from bs4 import BeautifulSoup
 from googleapiclient.discovery import build
@@ -14,6 +14,7 @@ from google.oauth2.credentials import Credentials
 from .categorizer import classify_category
 from .pdf_analysis import analyze_pdf, analyze_text
 from .Financial_vs_general_Classifier import get_financial_vs_general_classifier
+
 
 
 def _parse_rfc2822_date(s: str) -> Optional[datetime]:
@@ -141,12 +142,21 @@ def fetch_invoice_attachments(
         query: str,
         max_results: int = 20,
         time_window: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
 ) -> List[dict]:
     downloads_dir.mkdir(parents=True, exist_ok=True)
     service = build("gmail", "v1", credentials=creds)
     financial_vs_general = get_financial_vs_general_classifier()
 
-    q = query if not time_window else f"{query} newer_than:{time_window}"
+    q = query
+
+    if start_date and end_date:
+        after = start_date.strftime("%Y/%m/%d")
+        before = (end_date + timedelta(days=1)).strftime("%Y/%m/%d")
+        q = f"{q} after:{after} before:{before}"
+    elif time_window:
+        q = f"{q} newer_than:{time_window}"
     page_size = max(1, min(int(max_results or 20), 500))
     msgs: List[dict] = []
     page_token: Optional[str] = None
