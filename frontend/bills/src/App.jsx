@@ -9,32 +9,46 @@ const TIME_WINDOW_OPTIONS = [
     { value: "7d", label: "7 ימים" },
     { value: "14d", label: "14 ימים" },
     { value: "30d", label: "30 ימים" },
-    { value: "90d", label: "90 ימים" },
-    { value: "180d", label: "180 ימים" },
-    { value: "365d", label: "שנה" },
+    { value: "90d", label: "90 ימים (3 חודשים אחרונים)" },
+    { value: "180d", label: "180 ימים (6 חודשים אחרונים)" },
+    { value: "365d", label: "שנה (12 חודשים אחרונים)" },
 ];
+
+const TIME_WINDOW_MONTH_COUNT = {
+    "90d": 3,
+    "180d": 6,
+    "365d": 12,
+};
 
 const STATUS_OPTIONS = [
     { value: "all", label: "כל הסטטוסים" },
     { value: "unpaid", label: "לא שולם" },
     { value: "paid", label: "שולם" },
-    { value: "due_soon", label: "לתשלום בקרוב" },
+    { value: "due_soon", label: "ממתין לתשום" },
     { value: "overdue", label: "באיחור" },
     { value: "no_due", label: "ללא תאריך יעד" },
 ];
 
 const QUICK_FILTERS = [
     { value: "all", label: "הכול" },
-    { value: "high_amount", label: "מעל ₪500" },
     { value: "uncategorized", label: "ללא קטגוריה" },
     { value: "missing_amount", label: "ללא סכום" },
     { value: "has_file", label: "עם קובץ" },
 ];
 
+const CATEGORY_CHART_COLORS = ["#155b45", "#1f7a5d", "#2e8b57", "#c2872f", "#a56b0f", "#9d7a45", "#7b8b52", "#4f7f5d"];
+
 function toNumber(value) {
     if (value === null || value === undefined || value === "") return null;
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
+}
+
+function timeWindowDays(value) {
+    const match = /^(\d+)d$/.exec(String(value || ""));
+    if (!match) return null;
+    const days = Number(match[1]);
+    return Number.isFinite(days) && days > 0 ? days : null;
 }
 
 function parseDate(value) {
@@ -67,6 +81,16 @@ function monthLabel(key) {
     return date.toLocaleDateString("he-IL", { month: "short", year: "2-digit" });
 }
 
+function buildRecentMonthKeys(count) {
+    const safeCount = Math.max(0, Number(count) || 0);
+    const now = new Date();
+    return Array.from({ length: safeCount }, (_, index) => {
+        const shift = safeCount - index - 1;
+        const date = new Date(now.getFullYear(), now.getMonth() - shift, 1);
+        return monthKey(date);
+    });
+}
+
 function stableItemId(item) {
     return String(item.message_id ?? item.id ?? item.filename ?? "");
 }
@@ -89,19 +113,6 @@ function fileUrlFromSavedPath(savedPath) {
     return `${API_BASE}/files/${encodeURI(relative)}`;
 }
 
-function buildCopyText(item) {
-    const lines = [
-        `נושא: ${item.subject || "-"}`,
-        `שולח: ${item.sender || "-"}`,
-        `קטגוריה: ${item.category || "-"}`,
-        `סכום: ${money(item.amount, item.amount_currency || "₪")}`,
-        `תאריך יעד: ${formatDate(item.dueDate)}`,
-        `תאריך קבלה: ${formatDate(item.msgDate)}`,
-        `קובץ: ${item.filename || "-"}`,
-    ];
-    return lines.join("\n");
-}
-
 function getBillStatus(item) {
     if (item.isPaid) return { tone: "paid", label: "שולם" };
     if (item.isOverdue) return { tone: "overdue", label: `באיחור ${Math.abs(item.daysToDue)} ימים` };
@@ -120,10 +131,10 @@ export default function App() {
     const [category, setCategory] = useState("all");
     const [statusFilter, setStatusFilter] = useState("all");
     const [quickFilter, setQuickFilter] = useState("all");
-    const [minAmount, setMinAmount] = useState("");
-    const [maxAmount, setMaxAmount] = useState("");
-    const [monthFilter, setMonthFilter] = useState("");
     const [timeWindow, setTimeWindow] = useState("30d");
+    const [analysisCategory, setAnalysisCategory] = useState("all");
+    const [analysisMonthFilter, setAnalysisMonthFilter] = useState("");
+    const [analysisTimeWindow, setAnalysisTimeWindow] = useState("30d");
 
     const [paidIds, setPaidIds] = useState(() => new Set());
     const [loading, setLoading] = useState(true);
@@ -132,6 +143,9 @@ export default function App() {
     const [toastMessage, setToastMessage] = useState("");
 
     const deferredSearch = useDeferredValue(search);
+    const isHomeScreen = screen === "home";
+    const isAnalysisChartsScreen = screen === "analysis_charts";
+    const isAnalysisBillsScreen = screen === "analysis_bills";
 
     useEffect(() => {
         try {
@@ -178,18 +192,6 @@ export default function App() {
         });
 
         setToastMessage(isNowPaid ? `סומן כשולם: ${subject || "ללא נושא"}` : `בוטל סטטוס שולם: ${subject || "ללא נושא"}`);
-    }
-
-    async function copyBillDetails(item) {
-        try {
-            if (!navigator.clipboard) {
-                throw new Error("Clipboard API is not available");
-            }
-            await navigator.clipboard.writeText(buildCopyText(item));
-            setToastMessage("הפרטים הועתקו ללוח");
-        } catch {
-            setToastMessage("לא ניתן להעתיק כרגע");
-        }
     }
 
     function createReminder(item) {
@@ -285,9 +287,7 @@ export default function App() {
         setCategory("all");
         setStatusFilter("all");
         setQuickFilter("all");
-        setMinAmount("");
-        setMaxAmount("");
-        setMonthFilter("");
+        setTimeWindow("30d");
     }
 
     useEffect(() => {
@@ -325,8 +325,9 @@ export default function App() {
 
     const filteredItems = useMemo(() => {
         const query = deferredSearch.trim().toLowerCase();
-        const min = toNumber(minAmount);
-        const max = toNumber(maxAmount);
+        const windowDays = timeWindowDays(timeWindow);
+        const nowTs = Date.now();
+        const cutoffTs = windowDays === null ? null : nowTs - windowDays * 24 * 60 * 60 * 1000;
 
         const filtered = normalizedItems.filter((item) => {
             if (category !== "all" && item.category !== category) return false;
@@ -342,12 +343,11 @@ export default function App() {
             if (quickFilter === "missing_amount" && item.amount !== null) return false;
             if (quickFilter === "has_file" && !item.saved_path) return false;
 
-            if (min !== null && (item.amount === null || item.amount < min)) return false;
-            if (max !== null && (item.amount === null || item.amount > max)) return false;
-
-            if (monthFilter) {
-                const key = monthKey(item.msgDate || item.dueDate);
-                if (key !== monthFilter) return false;
+            if (cutoffTs !== null) {
+                const anchor = item.msgDate || item.dueDate;
+                if (!anchor) return false;
+                const anchorTs = anchor.getTime();
+                if (anchorTs < cutoffTs || anchorTs > nowTs) return false;
             }
 
             if (query) {
@@ -373,9 +373,7 @@ export default function App() {
         category,
         statusFilter,
         quickFilter,
-        minAmount,
-        maxAmount,
-        monthFilter,
+        timeWindow,
     ]);
 
     const stats = useMemo(() => {
@@ -383,23 +381,42 @@ export default function App() {
         const unpaidAmount = filteredItems.reduce((acc, item) => acc + (!item.isPaid ? item.amount ?? 0 : 0), 0);
         const dueSoonCount = filteredItems.filter((item) => item.isDueSoon && !item.isPaid).length;
         const overdueCount = filteredItems.filter((item) => item.isOverdue && !item.isPaid).length;
-        const paidCount = filteredItems.filter((item) => item.isPaid).length;
-        const paidRate = filteredItems.length ? Math.round((paidCount / filteredItems.length) * 100) : 0;
 
         return {
             visibleAmount,
             unpaidAmount,
             dueSoonCount,
             overdueCount,
-            paidRate,
             apiTotal: Number(summary?.total || 0),
         };
     }, [filteredItems, summary]);
 
+    const homeStats = useMemo(() => {
+        const pendingCount = normalizedItems.filter((item) => !item.isPaid).length;
+        const overdueCount = normalizedItems.filter((item) => item.isOverdue && !item.isPaid).length;
+
+        return {
+            pendingCount,
+            overdueCount,
+            apiTotal: Number(summary?.total || 0),
+        };
+    }, [normalizedItems, summary]);
+
     const monthlySourceItems = useMemo(() => {
-        if (category === "all") return normalizedItems;
-        return normalizedItems.filter((item) => item.category === category);
-    }, [normalizedItems, category]);
+        const windowDays = timeWindowDays(analysisTimeWindow);
+        const nowTs = Date.now();
+        const cutoffTs = windowDays === null ? null : nowTs - windowDays * 24 * 60 * 60 * 1000;
+
+        return normalizedItems.filter((item) => {
+            if (analysisCategory !== "all" && item.category !== analysisCategory) return false;
+
+            if (cutoffTs === null) return true;
+            const anchor = item.msgDate || item.dueDate;
+            if (!anchor) return false;
+            const anchorTs = anchor.getTime();
+            return anchorTs >= cutoffTs && anchorTs <= nowTs;
+        });
+    }, [normalizedItems, analysisCategory, analysisTimeWindow]);
 
     const monthlySeries = useMemo(() => {
         const totals = new Map();
@@ -412,15 +429,15 @@ export default function App() {
             totals.set(key, (totals.get(key) || 0) + item.amount);
         });
 
-        const keys = Array.from(totals.keys()).sort();
-        const recent = keys.slice(-8);
+        const fixedMonthCount = TIME_WINDOW_MONTH_COUNT[analysisTimeWindow] ?? null;
+        const keys = fixedMonthCount ? buildRecentMonthKeys(fixedMonthCount) : Array.from(totals.keys()).sort();
 
-        return recent.map((key) => ({
+        return keys.map((key) => ({
             key,
             label: monthLabel(key),
             total: totals.get(key) || 0,
         }));
-    }, [monthlySourceItems]);
+    }, [monthlySourceItems, analysisTimeWindow]);
 
     const maxChartValue = useMemo(() => {
         if (!monthlySeries.length) return 0;
@@ -466,11 +483,39 @@ export default function App() {
         return `${chartLinePath} L ${last.x} 88 L ${first.x} 88 Z`;
     }, [chartPoints, chartLinePath]);
 
+    const chartCanvasHeight = useMemo(() => {
+        if (!chartPoints.length) return 220;
+        return Math.max(200, Math.min(320, 180 + chartPoints.length * 8));
+    }, [chartPoints]);
+
+    const analysisFilteredItems = useMemo(() => {
+        if (!analysisMonthFilter) return monthlySourceItems;
+        return monthlySourceItems.filter((item) => {
+            const key = monthKey(item.msgDate || item.dueDate);
+            return key === analysisMonthFilter;
+        });
+    }, [monthlySourceItems, analysisMonthFilter]);
+
+    const analysisStats = useMemo(() => {
+        const visibleAmount = analysisFilteredItems.reduce((acc, item) => acc + (item.amount ?? 0), 0);
+        const unpaidAmount = analysisFilteredItems.reduce((acc, item) => acc + (!item.isPaid ? item.amount ?? 0 : 0), 0);
+        const dueSoonCount = analysisFilteredItems.filter((item) => item.isDueSoon && !item.isPaid).length;
+        const overdueCount = analysisFilteredItems.filter((item) => item.isOverdue && !item.isPaid).length;
+
+        return {
+            visibleAmount,
+            unpaidAmount,
+            dueSoonCount,
+            overdueCount,
+            apiTotal: Number(summary?.total || 0),
+        };
+    }, [analysisFilteredItems, summary]);
+
     useEffect(() => {
-        if (!monthFilter) return;
-        if (monthlySeries.some((bucket) => bucket.key === monthFilter)) return;
-        setMonthFilter("");
-    }, [monthlySeries, monthFilter]);
+        if (!analysisMonthFilter) return;
+        if (monthlySeries.some((bucket) => bucket.key === analysisMonthFilter)) return;
+        setAnalysisMonthFilter("");
+    }, [monthlySeries, analysisMonthFilter]);
 
     const alerts = useMemo(() => {
         const results = [];
@@ -519,7 +564,7 @@ export default function App() {
     const categorySeries = useMemo(() => {
         const grouped = new Map();
 
-        filteredItems.forEach((item) => {
+        analysisFilteredItems.forEach((item) => {
             const key = item.category || "ללא קטגוריה";
             const current = grouped.get(key) || { category: key, total: 0, count: 0 };
             current.total += item.amount ?? 0;
@@ -530,12 +575,50 @@ export default function App() {
         return Array.from(grouped.values())
             .sort((a, b) => b.total - a.total)
             .slice(0, 8);
-    }, [filteredItems]);
+    }, [analysisFilteredItems]);
 
-    const maxCategoryTotal = useMemo(() => {
-        if (!categorySeries.length) return 0;
-        return categorySeries.reduce((max, entry) => Math.max(max, entry.total), 0);
+    const categoryChart = useMemo(() => {
+        const slicesSource = categorySeries.filter((entry) => entry.total > 0);
+        const total = slicesSource.reduce((sum, entry) => sum + entry.total, 0);
+
+        if (!total) {
+            return { total: 0, slices: [] };
+        }
+
+        const radius = 70;
+        const circumference = 2 * Math.PI * radius;
+        let offset = 0;
+
+        const slices = slicesSource.map((entry, index) => {
+            const ratio = entry.total / total;
+            const segment = circumference * ratio;
+
+            const slice = {
+                ...entry,
+                color: CATEGORY_CHART_COLORS[index % CATEGORY_CHART_COLORS.length],
+                percent: ratio * 100,
+                dasharray: `${segment} ${Math.max(circumference - segment, 0)}`,
+                dashoffset: -offset,
+            };
+            offset += segment;
+            return slice;
+        });
+
+        return { total, slices };
     }, [categorySeries]);
+
+    const categoryLegendItems = useMemo(() => {
+        return categoryChart.slices.map((slice) => ({
+            category: slice.category,
+            count: slice.count,
+            total: slice.total,
+            percent: slice.percent,
+            color: slice.color,
+        }));
+    }, [categoryChart]);
+
+    const analysisViewItems = isAnalysisBillsScreen ? filteredItems : analysisFilteredItems;
+    const analysisViewStats = isAnalysisBillsScreen ? stats : analysisStats;
 
     return (
         <div className="page" dir="rtl" lang="he">
@@ -545,31 +628,13 @@ export default function App() {
                         <div className="eyebrow">Finance Workflow</div>
                         <h1 className="title">Dashboard חשבונות אינטראקטיבי</h1>
                         <p className="subtitle">KPI בזמן אמת, גרף מגמה, פילטרים חכמים, פעולות מהירות והתראות</p>
-                        <h1 className="projectTitle">Bliis</h1>
-                        <div className="viewTabs" role="tablist" aria-label="Main screens">
-                            <button
-                                className={`viewTab ${screen === "home" ? "active" : ""}`}
-                                onClick={() => setScreen("home")}
-                                role="tab"
-                                aria-selected={screen === "home"}
-                            >
-                                בית
-                            </button>
-                            <button
-                                className={`viewTab ${screen === "analysis" ? "active" : ""}`}
-                                onClick={() => setScreen("analysis")}
-                                role="tab"
-                                aria-selected={screen === "analysis"}
-                            >
-                                ניתוח הוצאות
-                            </button>
+                        <div className="projectLogoWrap">
+                            <img className="projectLogo" src="/logo-concept-b-header.png" alt="Bills logo" />
+                            <p className="projectLogoTagline">עושים לך סדר בחשבוניות</p>
                         </div>
                     </div>
 
                     <div className="topActions">
-                        <button className="btnSecondary" onClick={loadDashboard} disabled={loading || syncing}>
-                            רענון
-                        </button>
                         <button className="btnPrimary" onClick={syncNow} disabled={syncing}>
                             {syncing ? "מסנכרן..." : "סנכרון מייל"}
                         </button>
@@ -577,7 +642,56 @@ export default function App() {
                 </div>
             </header>
 
-            <main className="container main">
+            <aside className="sideNav" aria-label="ניווט ראשי">
+                <button
+                    className={`sideNavButton ${isHomeScreen ? "active" : ""}`}
+                    onClick={() => setScreen("home")}
+                    aria-current={isHomeScreen ? "page" : undefined}
+                >
+                    <span className="sideNavIcon" aria-hidden="true">
+                        <svg className="sideNavIconSvg" viewBox="0 0 24 24">
+                            <path d="M3 10.5L12 3l9 7.5" />
+                            <path d="M5 9.5V21h14V9.5" />
+                            <path d="M10 21v-6h4v6" />
+                        </svg>
+                    </span>
+                    <span className="sideNavLabel">בית</span>
+                </button>
+
+                <button
+                    className={`sideNavButton ${isAnalysisBillsScreen ? "active" : ""}`}
+                    onClick={() => setScreen("analysis_bills")}
+                    aria-current={isAnalysisBillsScreen ? "page" : undefined}
+                >
+                    <span className="sideNavIcon" aria-hidden="true">
+                        <svg className="sideNavIconSvg" viewBox="0 0 24 24">
+                            <path d="M7 3h7l5 5v13H7z" />
+                            <path d="M14 3v5h5" />
+                            <path d="M10 13h6" />
+                            <path d="M10 17h6" />
+                        </svg>
+                    </span>
+                    <span className="sideNavLabel">החשבוניות שלי</span>
+                </button>
+
+                <button
+                    className={`sideNavButton ${isAnalysisChartsScreen ? "active" : ""}`}
+                    onClick={() => setScreen("analysis_charts")}
+                    aria-current={isAnalysisChartsScreen ? "page" : undefined}
+                >
+                    <span className="sideNavIcon" aria-hidden="true">
+                        <svg className="sideNavIconSvg" viewBox="0 0 24 24">
+                            <path d="M5 20V9" />
+                            <path d="M12 20V5" />
+                            <path d="M19 20v-8" />
+                            <path d="M3 20h18" />
+                        </svg>
+                    </span>
+                    <span className="sideNavLabel">ניתוח הוצאות</span>
+                </button>
+            </aside>
+
+            <main className="container main withSideNav">
                 {loading && <section className="card center">טוען נתונים...</section>}
                 {!loading && error && (
                     <section className="card errorBox">
@@ -589,54 +703,32 @@ export default function App() {
 
                 {!loading && !error && (
                     <>
-                        {screen === "home" && (
+                        {isHomeScreen && (
                             <>
                                 <section className="kpiGrid">
                                     <article className="kpiCard">
-                                        <div className="kpiLabel">סה״כ חשבונות</div>
+                                        <div className="kpiLabel">סה״כ חשבוניות</div>
                                         <div className="kpiValue">{normalizedItems.length}</div>
                                     </article>
                                     <article className="kpiCard">
-                                        <div className="kpiLabel">סכום כולל במערכת</div>
-                                        <div className="kpiValue">{money(stats.apiTotal, "₪")}</div>
+                                        <div className="kpiLabel">סכום כולל</div>
+                                        <div className="kpiValue">{money(homeStats.apiTotal, "₪")}</div>
                                     </article>
-                                    <article className="kpiCard">
+                                   <article className="kpiCard">
                                         <div className="kpiLabel">תשלומים קרובים</div>
                                         <div className="kpiValue">{upcomingServerCount}</div>
                                     </article>
                                     <article className="kpiCard">
                                         <div className="kpiLabel">באיחור כרגע</div>
-                                        <div className="kpiValue">{stats.overdueCount}</div>
+                                        <div className="kpiValue">{homeStats.overdueCount}</div>
                                     </article>
                                     <article className="kpiCard">
-                                        <div className="kpiLabel">לא שולם</div>
-                                        <div className="kpiValue">{money(stats.unpaidAmount, "₪")}</div>
-                                    </article>
-                                    <article className="kpiCard">
-                                        <div className="kpiLabel">שיעור שולם</div>
-                                        <div className="kpiValue">{stats.paidRate}%</div>
+                                        <div className="kpiLabel">ממתין לתשלום</div>
+                                        <div className="kpiValue">{homeStats.pendingCount} חשבוניות</div>
                                     </article>
                                 </section>
 
                                 <section className="homeLayout">
-                                    <article className="card homeQuickCard">
-                                        <div className="sectionHeader">
-                                            <h2>פעולות מהירות</h2>
-                                        </div>
-                                        <p className="hint">סנכרון, מעבר למסך ניתוח והכנה מהירה לתשלום החשבונות הקרובים.</p>
-                                        <div className="homeActionsRow">
-                                            <button className="btnPrimary" onClick={() => setScreen("analysis")}>
-                                                מעבר לניתוח הוצאות
-                                            </button>
-                                            <button className="btnSecondary" onClick={syncNow} disabled={syncing}>
-                                                {syncing ? "מסנכרן..." : "סנכרון מייל"}
-                                            </button>
-                                            <button className="btnGhost" onClick={loadDashboard}>
-                                                רענון נתונים
-                                            </button>
-                                        </div>
-                                    </article>
-
                                     <article className="card alertsCard">
                                         <div className="sectionHeader">
                                             <h2>התראות מיידיות</h2>
@@ -716,43 +808,62 @@ export default function App() {
                             </>
                         )}
 
-                        {screen === "analysis" && (
+                        {(isAnalysisChartsScreen || isAnalysisBillsScreen) && (
                             <>
                                 <section className="kpiGrid">
                             <article className="kpiCard">
-                                <div className="kpiLabel">חשבונות מוצגים</div>
-                                <div className="kpiValue">{filteredItems.length}</div>
+                                <div className="kpiLabel">סה"כ חשבוניות</div>
+                                <div className="kpiValue">{analysisViewItems.length}</div>
                             </article>
                             <article className="kpiCard">
-                                <div className="kpiLabel">סה"כ סכום מוצג</div>
-                                <div className="kpiValue">{money(stats.visibleAmount, "₪")}</div>
+                                <div className="kpiLabel">סכום כולל</div>
+                                <div className="kpiValue">{money(analysisViewStats.visibleAmount, "₪")}</div>
                             </article>
                             <article className="kpiCard">
-                                <div className="kpiLabel">לתשלום בקרוב</div>
-                                <div className="kpiValue">{stats.dueSoonCount}</div>
+                                <div className="kpiLabel">ממתין לתשלום</div>
+                                <div className="kpiValue">{analysisViewStats.dueSoonCount}</div>
                             </article>
                             <article className="kpiCard">
                                 <div className="kpiLabel">באיחור</div>
-                                <div className="kpiValue">{stats.overdueCount}</div>
-                            </article>
-                            <article className="kpiCard">
-                                <div className="kpiLabel">שיעור שולם</div>
-                                <div className="kpiValue">{stats.paidRate}%</div>
-                            </article>
-                            <article className="kpiCard">
-                                <div className="kpiLabel">סה"כ מערכת (API)</div>
-                                <div className="kpiValue">{money(stats.apiTotal, "₪")}</div>
+                                <div className="kpiValue">{analysisViewStats.overdueCount}</div>
                             </article>
                         </section>
 
-                        <section className="insightsGrid">
+                        {isAnalysisChartsScreen && (
+                            <>
+                                <section className="card chartTimeWindowCard">
+                                    <div className="filtersGrid chartFiltersGrid">
+                                        <select
+                                            className="select"
+                                            value={analysisTimeWindow}
+                                            onChange={(event) => setAnalysisTimeWindow(event.target.value)}
+                                        >
+                                            {TIME_WINDOW_OPTIONS.map((option) => (
+                                                <option key={`charts-time-${option.value}`} value={option.value}>
+                                                    תקופת זמן: {option.label}
+                                                </option>
+                                            ))}
+                                        </select>
+
+                                        <select className="select" value={analysisCategory} onChange={(event) => setAnalysisCategory(event.target.value)}>
+                                            <option value="all">קטגוריות: כל הקטגוריות</option>
+                                            {categories.map((option) => (
+                                                <option key={`charts-category-${option}`} value={option}>
+                                                    קטגוריה: {option}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                </section>
+
+                                <section className="insightsGrid">
                             <article className="card chartCard">
                                 <div className="sectionHeader">
-                                    <h2>מגמת הוצאות חודשית</h2>
-                                    <button
-                                        className="textButton"
-                                        onClick={() => setMonthFilter("")}
-                                        disabled={!monthFilter}
+                                        <h2>מגמת הוצאות</h2>
+                                        <button
+                                            className="textButton"
+                                        onClick={() => setAnalysisMonthFilter("")}
+                                        disabled={!analysisMonthFilter}
                                     >
                                         נקה סינון חודש
                                     </button>
@@ -762,48 +873,59 @@ export default function App() {
 
                                 {monthlySeries.length > 0 && (
                                     <div className="lineChart">
-                                        <div className="lineChartCanvas">
-                                            <svg className="lineChartSvg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-                                                {[12, 31, 50, 69, 88].map((y) => (
-                                                    <line key={y} x1="6" y1={y} x2="94" y2={y} className="lineChartGrid" />
-                                                ))}
-                                                <path d={chartAreaPath} className="lineChartArea" />
-                                                <path d={chartLinePath} className="lineChartStroke" />
-                                            </svg>
+                                        <div className="lineChartViewport">
+                                            <div className="lineChartTrack">
+                                                <div className="lineChartCanvas" style={{ height: `${chartCanvasHeight}px` }}>
+                                                    <svg className="lineChartSvg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                                                        {[12, 31, 50, 69, 88].map((y) => (
+                                                            <line key={y} x1="6" y1={y} x2="94" y2={y} className="lineChartGrid" />
+                                                        ))}
+                                                        <path d={chartAreaPath} className="lineChartArea" />
+                                                        <path d={chartLinePath} className="lineChartStroke" />
+                                                    </svg>
 
-                                            <div className="lineChartPoints">
-                                                {chartPoints.map((point) => {
-                                                    const active = monthFilter === point.key;
+                                                    <div className="lineChartPoints">
+                                                        {chartPoints.map((point) => {
+                                                            const active = analysisMonthFilter === point.key;
 
-                                                    return (
-                                                        <button
-                                                            key={point.key}
-                                                            className={`lineChartPoint ${active ? "active" : ""}`}
-                                                            onClick={() => setMonthFilter((prev) => (prev === point.key ? "" : point.key))}
-                                                            style={{ left: `${point.x}%`, top: `${point.y}%` }}
-                                                            title={`${point.label}: ${money(point.total)}`}
-                                                            aria-label={`${point.label}: ${money(point.total)}`}
-                                                        />
-                                                    );
-                                                })}
+                                                            return (
+                                                                <button
+                                                                    key={point.key}
+                                                                    className={`lineChartPoint ${active ? "active" : ""}`}
+                                                                    onClick={() =>
+                                                                        setAnalysisMonthFilter((prev) => (prev === point.key ? "" : point.key))
+                                                                    }
+                                                                    style={{ left: `${point.x}%`, top: `${point.y}%` }}
+                                                                    title={`${point.label}: ${money(point.total)}`}
+                                                                    aria-label={`${point.label}: ${money(point.total)}`}
+                                                                />
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+
+                                                    <div className="lineChartAxis">
+                                                        {chartPoints.map((point) => {
+                                                        const active = analysisMonthFilter === point.key;
+
+                                                        return (
+                                                            <button
+                                                                key={`axis-${point.key}`}
+                                                                className={`lineChartAxisLabel ${active ? "active" : ""}`}
+                                                                onClick={() =>
+                                                                    setAnalysisMonthFilter((prev) => (prev === point.key ? "" : point.key))
+                                                                }
+                                                                style={{ left: `${point.x}%` }}
+                                                                title={`${point.label}: ${money(point.total)}`}
+                                                                aria-label={`${point.label}: ${money(point.total)}`}
+                                                            >
+                                                                <span className="lineChartAxisMonth">{point.label}</span>
+                                                                <span className="lineChartAxisAmount">{money(point.total, "₪")}</span>
+                                                            </button>
+                                                        );
+                                                    })}
+                                                </div>
                                             </div>
-                                        </div>
-
-                                        <div className="lineChartLegend">
-                                            {chartPoints.map((point) => {
-                                                const active = monthFilter === point.key;
-
-                                                return (
-                                                    <button
-                                                        key={point.key}
-                                                        className={`lineChartLegendButton ${active ? "active" : ""}`}
-                                                        onClick={() => setMonthFilter((prev) => (prev === point.key ? "" : point.key))}
-                                                    >
-                                                        <span>{point.label}</span>
-                                                        <strong>{money(point.total)}</strong>
-                                                    </button>
-                                                );
-                                            })}
                                         </div>
                                     </div>
                                 )}
@@ -812,41 +934,67 @@ export default function App() {
                             <article className="card categoryCard">
                                 <div className="sectionHeader">
                                     <h2>פילוח הוצאות לפי קטגוריה</h2>
-                                    <span className="hint">{categorySeries.length} קטגוריות מוצגות</span>
+                                    <span className="hint">{categoryChart.slices.length} קטגוריות מוצגות</span>
                                 </div>
 
-                                {categorySeries.length === 0 && <div className="emptyState">אין מספיק נתונים להצגת פילוח.</div>}
+                                {categoryChart.slices.length === 0 && <div className="emptyState">אין מספיק נתונים להצגת פילוח.</div>}
 
-                                {categorySeries.length > 0 && (
-                                    <div className="categoryList">
-                                        {categorySeries.map((entry) => {
-                                            const width = maxCategoryTotal ? Math.max(8, (entry.total / maxCategoryTotal) * 100) : 8;
+                                {categoryChart.slices.length > 0 && (
+                                    <div className="categoryDonutLayout">
+                                        <div className="categoryDonutWrap">
+                                            <svg
+                                                className="categoryDonutSvg"
+                                                viewBox="0 0 220 220"
+                                                role="img"
+                                                aria-label="פילוח הוצאות לפי קטגוריות"
+                                            >
+                                                <circle className="categoryDonutTrack" cx="110" cy="110" r="70" transform="rotate(-90 110 110)" />
+                                                {categoryChart.slices.map((slice) => (
+                                                    <circle
+                                                        key={slice.category}
+                                                        className="categoryDonutSlice"
+                                                        cx="110"
+                                                        cy="110"
+                                                        r="70"
+                                                        transform="rotate(-90 110 110)"
+                                                        stroke={slice.color}
+                                                        strokeDasharray={slice.dasharray}
+                                                        strokeDashoffset={slice.dashoffset}
+                                                    />
+                                                ))}
+                                            </svg>
 
-                                            return (
-                                                <div key={entry.category} className="categoryItem">
-                                                    <div className="categoryTop">
+                                            <div className="categoryDonutCenter">
+                                                <span>סה"כ בתקופה</span>
+                                                <strong>{money(categoryChart.total, "₪")}</strong>
+                                            </div>
+                                        </div>
+
+                                        <div className="categoryLegendList">
+                                            {categoryLegendItems.map((entry) => (
+                                                <div key={`legend-${entry.category}`} className="categoryLegendItem">
+                                                    <span className="categoryLegendSwatch" style={{ backgroundColor: entry.color }} />
+                                                    <div className="categoryLegendMain">
                                                         <strong>{entry.category}</strong>
                                                         <span>{entry.count} פריטים</span>
                                                     </div>
-                                                    <div className="categoryBar">
-                                                        <span style={{ width: `${width}%` }} />
+                                                    <div className="categoryLegendValues">
+                                                        <span>{entry.percent.toFixed(1)}%</span>
+                                                        <strong>{money(entry.total, "₪")}</strong>
                                                     </div>
-                                                    <div className="categoryAmount">{money(entry.total, "₪")}</div>
                                                 </div>
-                                            );
-                                        })}
+                                            ))}
+                                        </div>
                                     </div>
                                 )}
                             </article>
-                        </section>
+                            </section>
+                            </>
+                        )}
 
-                        <section className="card filtersCard">
-                            <div className="sectionHeader">
-                                <h2>פילטרים חכמים וחיפוש מהיר</h2>
-                                <span className="hint">
-                                    מציג {filteredItems.length} מתוך {normalizedItems.length}
-                                </span>
-                            </div>
+                        {isAnalysisBillsScreen && (
+                            <>
+                                <section className="card filtersCard">
 
                             <div className="filtersGrid">
                                 <input
@@ -877,22 +1025,6 @@ export default function App() {
                                     ))}
                                 </select>
 
-                                <input
-                                    type="number"
-                                    className="input"
-                                    value={minAmount}
-                                    onChange={(event) => setMinAmount(event.target.value)}
-                                    placeholder="סכום מינימלי"
-                                />
-
-                                <input
-                                    type="number"
-                                    className="input"
-                                    value={maxAmount}
-                                    onChange={(event) => setMaxAmount(event.target.value)}
-                                    placeholder="סכום מקסימלי"
-                                />
-
                                 <select
                                     className="select"
                                     value={timeWindow}
@@ -900,7 +1032,7 @@ export default function App() {
                                 >
                                     {TIME_WINDOW_OPTIONS.map((option) => (
                                         <option key={option.value} value={option.value}>
-                                            חלון סנכרון: {option.label}
+                                            תקופת זמן: {option.label}
                                         </option>
                                     ))}
                                 </select>
@@ -977,14 +1109,6 @@ export default function App() {
                                                 תזכורת
                                             </button>
 
-                                            <button
-                                                className="btnGhost small"
-                                                onClick={() => {
-                                                    void copyBillDetails(item);
-                                                }}
-                                            >
-                                                העתק
-                                            </button>
                                         </div>
                                     </article>
                                 );
@@ -996,6 +1120,8 @@ export default function App() {
                                 )}
                             </>
                         )}
+                    </>
+                )}
                     </>
                 )}
             </main>
