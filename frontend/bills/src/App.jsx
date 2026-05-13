@@ -1,9 +1,10 @@
-import { startTransition, useDeferredValue, useEffect, useMemo, useState } from "react";
+import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 
 const API_BASE = "http://127.0.0.1:8000";
 const DUE_SOON_DAYS = 14;
 const PAID_STORAGE_KEY = "bills_paid_ids_v1";
+const SUMMARY_DEFAULT = { total: 0, gmail_connected: false, connected_email: "", connected_user: "" };
 
 const TIME_WINDOW_OPTIONS = [
     { value: "7d", label: "7 ימים" },
@@ -21,12 +22,9 @@ const TIME_WINDOW_MONTH_COUNT = {
 };
 
 const STATUS_OPTIONS = [
-    { value: "all", label: "כל הסטטוסים" },
+    { value: "all", label: "הכול" },
     { value: "unpaid", label: "לא שולם" },
     { value: "paid", label: "שולם" },
-    { value: "due_soon", label: "ממתין לתשום" },
-    { value: "overdue", label: "באיחור" },
-    { value: "no_due", label: "ללא תאריך יעד" },
 ];
 
 const QUICK_FILTERS = [
@@ -34,6 +32,14 @@ const QUICK_FILTERS = [
     { value: "uncategorized", label: "ללא קטגוריה" },
     { value: "missing_amount", label: "ללא סכום" },
     { value: "has_file", label: "עם קובץ" },
+];
+
+const SORT_OPTIONS = [
+    { value: "due_asc", label: "מיון: יעד קרוב תחילה" },
+    { value: "due_desc", label: "מיון: יעד רחוק תחילה" },
+    { value: "amount_desc", label: "מיון: סכום גבוה תחילה" },
+    { value: "amount_asc", label: "מיון: סכום נמוך תחילה" },
+    { value: "received_desc", label: "מיון: התקבל לאחרונה" },
 ];
 
 const CATEGORY_CHART_COLORS = ["#155b45", "#1f7a5d", "#2e8b57", "#c2872f", "#a56b0f", "#9d7a45", "#7b8b52", "#4f7f5d"];
@@ -115,22 +121,73 @@ function fileUrlFromSavedPath(savedPath) {
 
 function getBillStatus(item) {
     if (item.isPaid) return { tone: "paid", label: "שולם" };
-    if (item.isOverdue) return { tone: "overdue", label: `באיחור ${Math.abs(item.daysToDue)} ימים` };
-    if (item.isDueSoon) return { tone: "soon", label: `לתשלום בעוד ${item.daysToDue} ימים` };
-    if (!item.dueDate) return { tone: "muted", label: "ללא תאריך יעד" };
-    return { tone: "open", label: "פתוח" };
+    return { tone: "unpaid", label: "לא שולם" };
+}
+
+function senderDisplay(value) {
+    if (!value) return "שולח לא זוהה";
+    const cleaned = String(value).replace(/<[^>]+>/g, "").trim();
+    return cleaned || String(value);
+}
+
+function senderInitials(value) {
+    const label = senderDisplay(value);
+    const tokens = label
+        .split(/[\s._-]+/)
+        .filter(Boolean)
+        .slice(0, 2);
+    if (!tokens.length) return "?";
+    return tokens.map((token) => token[0]).join("").toUpperCase();
+}
+
+function useAnimatedNumber(target, { duration = 700, decimals = 0 } = {}) {
+    const safeTarget = Number.isFinite(target) ? target : 0;
+    const [value, setValue] = useState(safeTarget);
+    const previousTarget = useRef(safeTarget);
+
+    useEffect(() => {
+        const from = Number.isFinite(previousTarget.current) ? previousTarget.current : 0;
+        const to = safeTarget;
+        previousTarget.current = to;
+
+        if (Math.abs(to - from) < 0.001) {
+            setValue(to);
+            return undefined;
+        }
+
+        let rafId = 0;
+        let startTs = 0;
+
+        const tick = (ts) => {
+            if (!startTs) startTs = ts;
+            const elapsed = ts - startTs;
+            const progress = Math.min(elapsed / duration, 1);
+            const eased = 1 - (1 - progress) * (1 - progress);
+            const nextValue = from + (to - from) * eased;
+            setValue(nextValue);
+            if (progress < 1) {
+                rafId = window.requestAnimationFrame(tick);
+            }
+        };
+
+        rafId = window.requestAnimationFrame(tick);
+        return () => window.cancelAnimationFrame(rafId);
+    }, [safeTarget, duration]);
+
+    if (decimals > 0) return Number(value.toFixed(decimals));
+    return Math.round(value);
 }
 
 export default function App() {
     const [items, setItems] = useState([]);
-    const [summary, setSummary] = useState({ total: 0 });
-    const [upcoming, setUpcoming] = useState({ count: 0, items: [] });
+    const [summary, setSummary] = useState(SUMMARY_DEFAULT);
     const [screen, setScreen] = useState("home");
 
     const [search, setSearch] = useState("");
     const [category, setCategory] = useState("all");
     const [statusFilter, setStatusFilter] = useState("all");
     const [quickFilter, setQuickFilter] = useState("all");
+    const [sortMode, setSortMode] = useState("due_asc");
     const [timeWindow, setTimeWindow] = useState("30d");
     const [analysisCategory, setAnalysisCategory] = useState("all");
     const [analysisMonthFilter, setAnalysisMonthFilter] = useState("");
@@ -139,8 +196,22 @@ export default function App() {
     const [paidIds, setPaidIds] = useState(() => new Set());
     const [loading, setLoading] = useState(true);
     const [syncing, setSyncing] = useState(false);
+    const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
+    const [syncTimeWindow, setSyncTimeWindow] = useState("30d");
     const [error, setError] = useState("");
     const [toastMessage, setToastMessage] = useState("");
+    const [chatInput, setChatInput] = useState("");
+    const [chatSending, setChatSending] = useState(false);
+    const [chatError, setChatError] = useState("");
+    const [chatPreviousResponseId, setChatPreviousResponseId] = useState("");
+    const [chatMessages, setChatMessages] = useState([
+        {
+            role: "assistant",
+            text: "אפשר לשאול אותי על ההוצאות שלך. לדוגמה: כמה הוצאתי החודש על חשמל לעומת החודש הקודם?",
+        },
+    ]);
+    const syncPopoverRef = useRef(null);
+    const chatMessagesRef = useRef(null);
 
     const deferredSearch = useDeferredValue(search);
     const isHomeScreen = screen === "home";
@@ -165,6 +236,34 @@ export default function App() {
         const timer = window.setTimeout(() => setToastMessage(""), 2800);
         return () => window.clearTimeout(timer);
     }, [toastMessage]);
+
+    useEffect(() => {
+        if (!chatMessagesRef.current) return;
+        chatMessagesRef.current.scrollTop = chatMessagesRef.current.scrollHeight;
+    }, [chatMessages, chatSending]);
+
+    useEffect(() => {
+        if (!isSyncModalOpen) return undefined;
+
+        const handlePointerDown = (event) => {
+            if (syncPopoverRef.current && !syncPopoverRef.current.contains(event.target)) {
+                closeSyncModal();
+            }
+        };
+
+        const handleKeyDown = (event) => {
+            if (event.key === "Escape") {
+                closeSyncModal();
+            }
+        };
+
+        document.addEventListener("mousedown", handlePointerDown);
+        document.addEventListener("keydown", handleKeyDown);
+        return () => {
+            document.removeEventListener("mousedown", handlePointerDown);
+            document.removeEventListener("keydown", handleKeyDown);
+        };
+    }, [isSyncModalOpen, syncing]);
 
     function updatePaidIds(updater) {
         setPaidIds((prev) => {
@@ -200,27 +299,71 @@ export default function App() {
         setToastMessage(`תזכורת מקומית נוצרה עבור ${subject} (יעד: ${dueText})`);
     }
 
+    async function sendChatMessage() {
+        const message = chatInput.trim();
+        if (!message || chatSending) return;
+
+        setChatInput("");
+        setChatError("");
+        setChatMessages((prev) => [...prev, { role: "user", text: message }]);
+        setChatSending(true);
+
+        try {
+            const res = await fetch(`${API_BASE}/chat/`, {
+                method: "POST",
+                credentials: "include",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    message,
+                    previous_response_id: chatPreviousResponseId || null,
+                }),
+            });
+
+            let payload = null;
+            try {
+                payload = await res.json();
+            } catch {
+                payload = null;
+            }
+
+            if (!res.ok || !payload?.ok) {
+                const messageText = payload?.error || `Chat API error: ${res.status}`;
+                throw new Error(messageText);
+            }
+
+            const answer = String(payload.answer || "").trim() || "לא התקבלה תשובה.";
+            setChatMessages((prev) => [...prev, { role: "assistant", text: answer }]);
+            setChatPreviousResponseId(payload.response_id || "");
+        } catch (e) {
+            const messageText = e?.message || "שליחת הודעה נכשלה";
+            setChatError(messageText);
+            setChatMessages((prev) => [
+                ...prev,
+                { role: "assistant", text: `אירעה שגיאה: ${messageText}` },
+            ]);
+        } finally {
+            setChatSending(false);
+        }
+    }
+
     async function loadDashboard() {
         try {
             setLoading(true);
             setError("");
 
-            const [billsRes, sumRes, upRes] = await Promise.all([
+            const [billsRes, sumRes] = await Promise.all([
                 fetch(`${API_BASE}/bills/`, { credentials: "include" }),
                 fetch(`${API_BASE}/summary/`, { credentials: "include" }),
-                fetch(`${API_BASE}/upcoming/`, { credentials: "include" }),
             ]);
 
             if (!billsRes.ok) throw new Error(`Bills API error: ${billsRes.status}`);
             if (!sumRes.ok) throw new Error(`Summary API error: ${sumRes.status}`);
-            if (!upRes.ok) throw new Error(`Upcoming API error: ${upRes.status}`);
 
-            const [billsData, sumData, upData] = await Promise.all([billsRes.json(), sumRes.json(), upRes.json()]);
+            const [billsData, sumData] = await Promise.all([billsRes.json(), sumRes.json()]);
 
             startTransition(() => {
                 setItems(Array.isArray(billsData?.items) ? billsData.items : []);
-                setSummary(sumData || { total: 0 });
-                setUpcoming(upData || { count: 0, items: [] });
+                setSummary({ ...SUMMARY_DEFAULT, ...(sumData || {}) });
             });
         } catch (e) {
             setError(e?.message || "Failed to load data");
@@ -229,7 +372,17 @@ export default function App() {
         }
     }
 
-    async function syncNow() {
+    function openSyncModal() {
+        setSyncTimeWindow(timeWindow || "30d");
+        setIsSyncModalOpen(true);
+    }
+
+    function closeSyncModal() {
+        if (syncing) return;
+        setIsSyncModalOpen(false);
+    }
+
+    async function syncNow(windowValue = timeWindow) {
         try {
             setSyncing(true);
             setError("");
@@ -238,7 +391,7 @@ export default function App() {
                 method: "POST",
                 credentials: "include",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ max_results: 100, time_window: timeWindow }),
+                body: JSON.stringify({ max_results: 100, time_window: windowValue }),
             });
 
             if (res.status === 401) {
@@ -258,6 +411,12 @@ export default function App() {
         } finally {
             setSyncing(false);
         }
+    }
+
+    async function confirmSyncNow() {
+        const selectedWindow = syncTimeWindow || "30d";
+        setIsSyncModalOpen(false);
+        await syncNow(selectedWindow);
     }
 
     async function cleanDatabase() {
@@ -287,6 +446,7 @@ export default function App() {
         setCategory("all");
         setStatusFilter("all");
         setQuickFilter("all");
+        setSortMode("due_asc");
         setTimeWindow("30d");
     }
 
@@ -334,9 +494,6 @@ export default function App() {
 
             if (statusFilter === "unpaid" && item.isPaid) return false;
             if (statusFilter === "paid" && !item.isPaid) return false;
-            if (statusFilter === "due_soon" && (!item.isDueSoon || item.isPaid)) return false;
-            if (statusFilter === "overdue" && (!item.isOverdue || item.isPaid)) return false;
-            if (statusFilter === "no_due" && item.dueDate) return false;
 
             if (quickFilter === "high_amount" && (item.amount === null || item.amount < 500)) return false;
             if (quickFilter === "uncategorized" && item.category) return false;
@@ -359,13 +516,25 @@ export default function App() {
         });
 
         return filtered.sort((a, b) => {
+            if (sortMode === "amount_desc" || sortMode === "amount_asc") {
+                const aAmount = a.amount ?? (sortMode === "amount_desc" ? -Infinity : Infinity);
+                const bAmount = b.amount ?? (sortMode === "amount_desc" ? -Infinity : Infinity);
+                return sortMode === "amount_desc" ? bAmount - aAmount : aAmount - bAmount;
+            }
+
+            if (sortMode === "received_desc") {
+                const aDate = a.msgDate ? a.msgDate.getTime() : 0;
+                const bDate = b.msgDate ? b.msgDate.getTime() : 0;
+                return bDate - aDate;
+            }
+
             if (a.isPaid !== b.isPaid) return a.isPaid ? 1 : -1;
             if (a.isOverdue !== b.isOverdue) return a.isOverdue ? -1 : 1;
             if (a.isDueSoon !== b.isDueSoon) return a.isDueSoon ? -1 : 1;
 
             const aDue = a.dueDate ? a.dueDate.getTime() : Number.MAX_SAFE_INTEGER;
             const bDue = b.dueDate ? b.dueDate.getTime() : Number.MAX_SAFE_INTEGER;
-            return aDue - bDue;
+            return sortMode === "due_desc" ? bDue - aDue : aDue - bDue;
         });
     }, [
         normalizedItems,
@@ -373,31 +542,30 @@ export default function App() {
         category,
         statusFilter,
         quickFilter,
+        sortMode,
         timeWindow,
     ]);
 
     const stats = useMemo(() => {
         const visibleAmount = filteredItems.reduce((acc, item) => acc + (item.amount ?? 0), 0);
-        const unpaidAmount = filteredItems.reduce((acc, item) => acc + (!item.isPaid ? item.amount ?? 0 : 0), 0);
-        const dueSoonCount = filteredItems.filter((item) => item.isDueSoon && !item.isPaid).length;
-        const overdueCount = filteredItems.filter((item) => item.isOverdue && !item.isPaid).length;
+        const pendingCount = filteredItems.filter((item) => !item.isPaid).length;
+        const paidCount = filteredItems.filter((item) => item.isPaid).length;
 
         return {
             visibleAmount,
-            unpaidAmount,
-            dueSoonCount,
-            overdueCount,
+            pendingCount,
+            paidCount,
             apiTotal: Number(summary?.total || 0),
         };
     }, [filteredItems, summary]);
 
     const homeStats = useMemo(() => {
         const pendingCount = normalizedItems.filter((item) => !item.isPaid).length;
-        const overdueCount = normalizedItems.filter((item) => item.isOverdue && !item.isPaid).length;
+        const paidCount = normalizedItems.filter((item) => item.isPaid).length;
 
         return {
             pendingCount,
-            overdueCount,
+            paidCount,
             apiTotal: Number(summary?.total || 0),
         };
     }, [normalizedItems, summary]);
@@ -498,15 +666,13 @@ export default function App() {
 
     const analysisStats = useMemo(() => {
         const visibleAmount = analysisFilteredItems.reduce((acc, item) => acc + (item.amount ?? 0), 0);
-        const unpaidAmount = analysisFilteredItems.reduce((acc, item) => acc + (!item.isPaid ? item.amount ?? 0 : 0), 0);
-        const dueSoonCount = analysisFilteredItems.filter((item) => item.isDueSoon && !item.isPaid).length;
-        const overdueCount = analysisFilteredItems.filter((item) => item.isOverdue && !item.isPaid).length;
+        const pendingCount = analysisFilteredItems.filter((item) => !item.isPaid).length;
+        const paidCount = analysisFilteredItems.filter((item) => item.isPaid).length;
 
         return {
             visibleAmount,
-            unpaidAmount,
-            dueSoonCount,
-            overdueCount,
+            pendingCount,
+            paidCount,
             apiTotal: Number(summary?.total || 0),
         };
     }, [analysisFilteredItems, summary]);
@@ -517,40 +683,6 @@ export default function App() {
         setAnalysisMonthFilter("");
     }, [monthlySeries, analysisMonthFilter]);
 
-    const alerts = useMemo(() => {
-        const results = [];
-
-        normalizedItems.forEach((item) => {
-            if (item.isPaid || !item.dueDate) return;
-
-            if (item.isOverdue) {
-                results.push({
-                    stableId: item.stableId,
-                    type: "danger",
-                    priority: 0,
-                    title: item.subject || item.filename || "חיוב ללא כותרת",
-                    subtitle: `באיחור ${Math.abs(item.daysToDue)} ימים`,
-                });
-                return;
-            }
-
-            if (item.isDueSoon) {
-                results.push({
-                    stableId: item.stableId,
-                    type: "warning",
-                    priority: 1,
-                    title: item.subject || item.filename || "חיוב ללא כותרת",
-                    subtitle: `לתשלום בעוד ${item.daysToDue} ימים`,
-                });
-            }
-        });
-
-        return results
-            .sort((a, b) => a.priority - b.priority)
-            .slice(0, 6);
-    }, [normalizedItems]);
-
-    const upcomingServerCount = Number(upcoming?.count || 0);
     const recentItems = useMemo(() => {
         return [...normalizedItems]
             .sort((a, b) => {
@@ -619,25 +751,56 @@ export default function App() {
 
     const analysisViewItems = isAnalysisBillsScreen ? filteredItems : analysisFilteredItems;
     const analysisViewStats = isAnalysisBillsScreen ? stats : analysisStats;
+    const animatedHomeBillsCount = useAnimatedNumber(normalizedItems.length);
+    const animatedHomeTotal = useAnimatedNumber(homeStats.apiTotal, { decimals: 2 });
+    const animatedHomePaidCount = useAnimatedNumber(homeStats.paidCount);
+    const animatedHomePendingCount = useAnimatedNumber(homeStats.pendingCount);
+    const animatedAnalysisBillsCount = useAnimatedNumber(analysisViewItems.length);
+    const animatedAnalysisVisibleAmount = useAnimatedNumber(analysisViewStats.visibleAmount, { decimals: 2 });
+    const animatedAnalysisPaidCount = useAnimatedNumber(analysisViewStats.paidCount);
+    const animatedAnalysisPendingCount = useAnimatedNumber(analysisViewStats.pendingCount);
 
     return (
         <div className="page" dir="rtl" lang="he">
             <header className="topbar">
                 <div className="container topbarInner">
-                    <div>
-                        <div className="eyebrow">Finance Workflow</div>
-                        <h1 className="title">Dashboard חשבונות אינטראקטיבי</h1>
-                        <p className="subtitle">KPI בזמן אמת, גרף מגמה, פילטרים חכמים, פעולות מהירות והתראות</p>
-                        <div className="projectLogoWrap">
-                            <img className="projectLogo" src="/logo-concept-b-header.png" alt="Bills logo" />
-                            <p className="projectLogoTagline">עושים לך סדר בחשבוניות</p>
-                        </div>
+                    <div className="projectLogoWrap">
+                        <img className="projectLogo" src="/logo-concept-b-header.png" alt="Bills logo" />
                     </div>
 
-                    <div className="topActions">
-                        <button className="btnPrimary" onClick={syncNow} disabled={syncing}>
-                            {syncing ? "מסנכרן..." : "סנכרון מייל"}
+                    <div className="topActions" ref={syncPopoverRef}>
+                        <button className="btnPrimary syncMainButton" onClick={openSyncModal} disabled={syncing}>
+                            {syncing ? "מסנכרן..." : "🔄 סנכרן חשבוניות"}
                         </button>
+
+                        {isSyncModalOpen && (
+                            <section className="syncPopover" role="dialog" aria-label="בחירת תקופת סנכרון">
+                                <label className="syncPopoverField">
+                                    <span>תקופת זמן</span>
+                                    <select
+                                        className="select"
+                                        value={syncTimeWindow}
+                                        onChange={(event) => setSyncTimeWindow(event.target.value)}
+                                        disabled={syncing}
+                                    >
+                                        {TIME_WINDOW_OPTIONS.map((option) => (
+                                            <option key={`sync-time-${option.value}`} value={option.value}>
+                                                {option.label}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </label>
+
+                                <div className="syncPopoverActions">
+                                    <button className="btnGhost small" onClick={closeSyncModal} disabled={syncing}>
+                                        ביטול
+                                    </button>
+                                    <button className="btnPrimary small" onClick={confirmSyncNow} disabled={syncing}>
+                                        סנכרן
+                                    </button>
+                                </div>
+                            </section>
+                        )}
                     </div>
                 </div>
             </header>
@@ -705,62 +868,44 @@ export default function App() {
                     <>
                         {isHomeScreen && (
                             <>
-                                <section className="kpiGrid">
-                                    <article className="kpiCard">
-                                        <div className="kpiLabel">סה״כ חשבוניות</div>
-                                        <div className="kpiValue">{normalizedItems.length}</div>
-                                    </article>
-                                    <article className="kpiCard">
-                                        <div className="kpiLabel">סכום כולל</div>
-                                        <div className="kpiValue">{money(homeStats.apiTotal, "₪")}</div>
-                                    </article>
-                                   <article className="kpiCard">
-                                        <div className="kpiLabel">תשלומים קרובים</div>
-                                        <div className="kpiValue">{upcomingServerCount}</div>
-                                    </article>
-                                    <article className="kpiCard">
-                                        <div className="kpiLabel">באיחור כרגע</div>
-                                        <div className="kpiValue">{homeStats.overdueCount}</div>
-                                    </article>
-                                    <article className="kpiCard">
-                                        <div className="kpiLabel">ממתין לתשלום</div>
-                                        <div className="kpiValue">{homeStats.pendingCount} חשבוניות</div>
-                                    </article>
-                                </section>
-
-                                <section className="homeLayout">
-                                    <article className="card alertsCard">
-                                        <div className="sectionHeader">
-                                            <h2>התראות מיידיות</h2>
-                                            <span className="alertCounter">{alerts.length}</span>
+                                <section className="kpiGrid fadeIn">
+                                    <article className="kpiCard bills">
+                                        <div className="kpiLabel">
+                                            <span className="kpiLabelIcon" aria-hidden="true">📄</span>
+                                            <span>סה״כ חשבוניות</span>
                                         </div>
-
-                                        {alerts.length === 0 && <div className="emptyState">אין התראות דחופות כרגע.</div>}
-
-                                        {alerts.map((alert) => (
-                                            <div key={alert.stableId} className={`alertItem ${alert.type}`}>
-                                                <div>
-                                                    <div className="alertTitle">{alert.title}</div>
-                                                    <div className="alertSubtitle">{alert.subtitle}</div>
-                                                </div>
-                                                <button
-                                                    className="tinyButton"
-                                                    onClick={() => togglePaidById(alert.stableId, alert.title)}
-                                                >
-                                                    סמן כשולם
-                                                </button>
-                                            </div>
-                                        ))}
+                                        <div className="kpiValue">{animatedHomeBillsCount}</div>
+                                    </article>
+                                    <article className="kpiCard amount">
+                                        <div className="kpiLabel">
+                                            <span className="kpiLabelIcon" aria-hidden="true">₪</span>
+                                            <span>סכום כולל</span>
+                                        </div>
+                                        <div className="kpiValue">{money(animatedHomeTotal, "₪")}</div>
+                                    </article>
+                                    <article className="kpiCard paid">
+                                        <div className="kpiLabel">
+                                            <span className="kpiLabelIcon" aria-hidden="true">✅</span>
+                                            <span>חשבוניות ששולמו</span>
+                                        </div>
+                                        <div className="kpiValue">{animatedHomePaidCount}</div>
+                                    </article>
+                                    <article className="kpiCard pending">
+                                        <div className="kpiLabel">
+                                            <span className="kpiLabelIcon" aria-hidden="true">🧾</span>
+                                            <span>ממתין לתשלום</span>
+                                        </div>
+                                        <div className="kpiValue">{animatedHomePendingCount}</div>
                                     </article>
                                 </section>
 
-                                <section className="card recentCard">
+                                <section className="card recentCard fadeIn interactiveCard">
                                     <div className="sectionHeader">
-                                        <h2>חשבונות אחרונים</h2>
-                                        <span className="hint">מציג {recentItems.length} חשבונות אחרונים</span>
+                                        <h2>חשבוניות אחרונות</h2>
+                                        <span className="hint">מציג {recentItems.length} חשבוניות אחרונות</span>
                                     </div>
 
-                                    {recentItems.length === 0 && <div className="emptyState">עדיין אין חשבונות להצגה.</div>}
+                                    {recentItems.length === 0 && <div className="emptyState">עדיין אין חשבוניות להצגה.</div>}
 
                                     {recentItems.length > 0 && (
                                         <div className="recentList">
@@ -768,30 +913,46 @@ export default function App() {
                                                 const status = getBillStatus(item);
                                                 const subject = item.subject || item.filename || "ללא נושא";
                                                 const fileUrl = fileUrlFromSavedPath(item.saved_path);
+                                                const receivedDateText = item.msgDate ? formatDate(item.msgDate) : "—";
+                                                const dueDateText = item.dueDate ? formatDate(item.dueDate) : "—";
 
                                                 return (
-                                                    <div key={`recent-${item.stableId}-${item.id}`} className="recentItem">
-                                                        <div className="recentMain">
-                                                            <div className="recentSubject">{subject}</div>
-                                                            <div className="recentMeta">
-                                                                {item.sender || "שולח לא זוהה"} • התקבל: {formatDate(item.msgDate)}
+                                                    <article key={`recent-${item.stableId}-${item.id}`} className={`recentItem ${status.tone}`}>
+                                                        <div className="recentItemTop">
+                                                            <div className="recentSubjectWrap">
+                                                                <div className="recentSubject">{subject}</div>
+                                                                <div className="recentCompanyName">{senderDisplay(item.sender)}</div>
                                                             </div>
+                                                            <span className={`statusBadge ${status.tone}`}>{status.label}</span>
                                                         </div>
 
-                                                        <div className="recentAmount">{money(item.amount, item.amount_currency || "₪")}</div>
-                                                        <span className={`statusBadge ${status.tone}`}>{status.label}</span>
+                                                        <div className="recentItemBody">
+                                                            <div className="recentFields">
+                                                                <div className="recentFieldRow">
+                                                                    <span className="recentFieldLabel">סכום:</span>
+                                                                    <span className="recentFieldValue">{money(item.amount, item.amount_currency || "₪")}</span>
+                                                                </div>
+                                                                <div className="recentFieldRow">
+                                                                    <span className="recentFieldLabel">התקבל:</span>
+                                                                    <span className="recentFieldValue">{receivedDateText}</span>
+                                                                </div>
+                                                                <div className="recentFieldRow">
+                                                                    <span className="recentFieldLabel">יעד:</span>
+                                                                    <span className="recentFieldValue">{dueDateText}</span>
+                                                                </div>
+                                                            </div>
+                                                        </div>
 
                                                         <div className="recentRowActions">
                                                             {item.saved_path ? (
                                                                 <a className="btnSecondary small" href={fileUrl} target="_blank" rel="noreferrer">
-                                                                    קובץ
+                                                                    צפייה
                                                                 </a>
                                                             ) : (
                                                                 <button className="btnSecondary small" disabled>
                                                                     אין קובץ
                                                                 </button>
                                                             )}
-
                                                             <button
                                                                 className="btnPrimary small"
                                                                 onClick={() => togglePaidById(item.stableId, subject)}
@@ -799,7 +960,7 @@ export default function App() {
                                                                 {item.isPaid ? "בטל שולם" : "סמן כשולם"}
                                                             </button>
                                                         </div>
-                                                    </div>
+                                                    </article>
                                                 );
                                             })}
                                         </div>
@@ -810,318 +971,406 @@ export default function App() {
 
                         {(isAnalysisChartsScreen || isAnalysisBillsScreen) && (
                             <>
-                                <section className="kpiGrid">
-                            <article className="kpiCard">
-                                <div className="kpiLabel">סה"כ חשבוניות</div>
-                                <div className="kpiValue">{analysisViewItems.length}</div>
-                            </article>
-                            <article className="kpiCard">
-                                <div className="kpiLabel">סכום כולל</div>
-                                <div className="kpiValue">{money(analysisViewStats.visibleAmount, "₪")}</div>
-                            </article>
-                            <article className="kpiCard">
-                                <div className="kpiLabel">ממתין לתשלום</div>
-                                <div className="kpiValue">{analysisViewStats.dueSoonCount}</div>
-                            </article>
-                            <article className="kpiCard">
-                                <div className="kpiLabel">באיחור</div>
-                                <div className="kpiValue">{analysisViewStats.overdueCount}</div>
-                            </article>
-                        </section>
-
-                        {isAnalysisChartsScreen && (
-                            <>
-                                <section className="card chartTimeWindowCard">
-                                    <div className="filtersGrid chartFiltersGrid">
-                                        <select
-                                            className="select"
-                                            value={analysisTimeWindow}
-                                            onChange={(event) => setAnalysisTimeWindow(event.target.value)}
-                                        >
-                                            {TIME_WINDOW_OPTIONS.map((option) => (
-                                                <option key={`charts-time-${option.value}`} value={option.value}>
-                                                    תקופת זמן: {option.label}
-                                                </option>
-                                            ))}
-                                        </select>
-
-                                        <select className="select" value={analysisCategory} onChange={(event) => setAnalysisCategory(event.target.value)}>
-                                            <option value="all">קטגוריות: כל הקטגוריות</option>
-                                            {categories.map((option) => (
-                                                <option key={`charts-category-${option}`} value={option}>
-                                                    קטגוריה: {option}
-                                                </option>
-                                            ))}
-                                        </select>
-                                    </div>
+                                <section className="kpiGrid fadeIn">
+                                    <article className="kpiCard bills">
+                                        <div className="kpiLabel">
+                                            <span className="kpiLabelIcon" aria-hidden="true">📄</span>
+                                            <span>סה״כ חשבוניות</span>
+                                        </div>
+                                        <div className="kpiValue">{animatedAnalysisBillsCount}</div>
+                                    </article>
+                                    <article className="kpiCard amount">
+                                        <div className="kpiLabel">
+                                            <span className="kpiLabelIcon" aria-hidden="true">₪</span>
+                                            <span>סכום כולל</span>
+                                        </div>
+                                        <div className="kpiValue">{money(animatedAnalysisVisibleAmount, "₪")}</div>
+                                    </article>
+                                    <article className="kpiCard paid">
+                                        <div className="kpiLabel">
+                                            <span className="kpiLabelIcon" aria-hidden="true">✅</span>
+                                            <span>חשבוניות ששולמו</span>
+                                        </div>
+                                        <div className="kpiValue">{animatedAnalysisPaidCount}</div>
+                                    </article>
+                                    <article className="kpiCard pending">
+                                        <div className="kpiLabel">
+                                            <span className="kpiLabelIcon" aria-hidden="true">🧾</span>
+                                            <span>ממתין לתשלום</span>
+                                        </div>
+                                        <div className="kpiValue">{animatedAnalysisPendingCount}</div>
+                                    </article>
                                 </section>
 
-                                <section className="insightsGrid">
-                            <article className="card chartCard">
-                                <div className="sectionHeader">
-                                        <h2>מגמת הוצאות</h2>
-                                        <button
-                                            className="textButton"
-                                        onClick={() => setAnalysisMonthFilter("")}
-                                        disabled={!analysisMonthFilter}
-                                    >
-                                        נקה סינון חודש
-                                    </button>
-                                </div>
+                                {isAnalysisChartsScreen && (
+                                    <>
+                                        <section className="card chartTimeWindowCard">
+                                            <div className="filtersGrid chartFiltersGrid">
+                                                <select
+                                                    className="select"
+                                                    value={analysisTimeWindow}
+                                                    onChange={(event) => setAnalysisTimeWindow(event.target.value)}
+                                                >
+                                                    {TIME_WINDOW_OPTIONS.map((option) => (
+                                                        <option key={`charts-time-${option.value}`} value={option.value}>
+                                                            תקופת זמן: {option.label}
+                                                        </option>
+                                                    ))}
+                                                </select>
 
-                                {monthlySeries.length === 0 && <div className="emptyState">אין מספיק נתונים להצגת גרף.</div>}
+                                                <select className="select" value={analysisCategory} onChange={(event) => setAnalysisCategory(event.target.value)}>
+                                                    <option value="all">קטגוריות: כל הקטגוריות</option>
+                                                    {categories.map((option) => (
+                                                        <option key={`charts-category-${option}`} value={option}>
+                                                            קטגוריה: {option}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                        </section>
 
-                                {monthlySeries.length > 0 && (
-                                    <div className="lineChart">
-                                        <div className="lineChartViewport">
-                                            <div className="lineChartTrack">
-                                                <div className="lineChartCanvas" style={{ height: `${chartCanvasHeight}px` }}>
-                                                    <svg className="lineChartSvg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-                                                        {[12, 31, 50, 69, 88].map((y) => (
-                                                            <line key={y} x1="6" y1={y} x2="94" y2={y} className="lineChartGrid" />
-                                                        ))}
-                                                        <path d={chartAreaPath} className="lineChartArea" />
-                                                        <path d={chartLinePath} className="lineChartStroke" />
-                                                    </svg>
-
-                                                    <div className="lineChartPoints">
-                                                        {chartPoints.map((point) => {
-                                                            const active = analysisMonthFilter === point.key;
-
-                                                            return (
-                                                                <button
-                                                                    key={point.key}
-                                                                    className={`lineChartPoint ${active ? "active" : ""}`}
-                                                                    onClick={() =>
-                                                                        setAnalysisMonthFilter((prev) => (prev === point.key ? "" : point.key))
-                                                                    }
-                                                                    style={{ left: `${point.x}%`, top: `${point.y}%` }}
-                                                                    title={`${point.label}: ${money(point.total)}`}
-                                                                    aria-label={`${point.label}: ${money(point.total)}`}
-                                                                />
-                                                            );
-                                                        })}
-                                                    </div>
+                                        <section className="insightsGrid">
+                                            <article className="card chartCard">
+                                                <div className="sectionHeader">
+                                                    <h2>מגמת הוצאות</h2>
+                                                    <button
+                                                        className="textButton"
+                                                        onClick={() => setAnalysisMonthFilter("")}
+                                                        disabled={!analysisMonthFilter}
+                                                    >
+                                                        נקה סינון חודש
+                                                    </button>
                                                 </div>
 
-                                                    <div className="lineChartAxis">
-                                                        {chartPoints.map((point) => {
-                                                        const active = analysisMonthFilter === point.key;
+                                                {monthlySeries.length === 0 && <div className="emptyState">אין מספיק נתונים להצגת גרף.</div>}
 
-                                                        return (
-                                                            <button
-                                                                key={`axis-${point.key}`}
-                                                                className={`lineChartAxisLabel ${active ? "active" : ""}`}
-                                                                onClick={() =>
-                                                                    setAnalysisMonthFilter((prev) => (prev === point.key ? "" : point.key))
-                                                                }
-                                                                style={{ left: `${point.x}%` }}
-                                                                title={`${point.label}: ${money(point.total)}`}
-                                                                aria-label={`${point.label}: ${money(point.total)}`}
+                                                {monthlySeries.length > 0 && (
+                                                    <div className="lineChart">
+                                                        <div className="lineChartViewport">
+                                                            <div className="lineChartTrack">
+                                                                <div className="lineChartCanvas" style={{ height: `${chartCanvasHeight}px` }}>
+                                                                    <svg className="lineChartSvg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                                                                        {[12, 31, 50, 69, 88].map((y) => (
+                                                                            <line key={y} x1="6" y1={y} x2="94" y2={y} className="lineChartGrid" />
+                                                                        ))}
+                                                                        <path d={chartAreaPath} className="lineChartArea" />
+                                                                        <path d={chartLinePath} className="lineChartStroke" />
+                                                                    </svg>
+
+                                                                    <div className="lineChartPoints">
+                                                                        {chartPoints.map((point) => {
+                                                                            const active = analysisMonthFilter === point.key;
+
+                                                                            return (
+                                                                                <button
+                                                                                    key={point.key}
+                                                                                    className={`lineChartPoint ${active ? "active" : ""}`}
+                                                                                    onClick={() =>
+                                                                                        setAnalysisMonthFilter((prev) => (prev === point.key ? "" : point.key))
+                                                                                    }
+                                                                                    style={{ left: `${point.x}%`, top: `${point.y}%` }}
+                                                                                    title={`${point.label}: ${money(point.total)}`}
+                                                                                    aria-label={`${point.label}: ${money(point.total)}`}
+                                                                                />
+                                                                            );
+                                                                        })}
+                                                                    </div>
+                                                                </div>
+
+                                                                <div className="lineChartAxis">
+                                                                    {chartPoints.map((point) => {
+                                                                        const active = analysisMonthFilter === point.key;
+
+                                                                        return (
+                                                                            <button
+                                                                                key={`axis-${point.key}`}
+                                                                                className={`lineChartAxisLabel ${active ? "active" : ""}`}
+                                                                                onClick={() =>
+                                                                                    setAnalysisMonthFilter((prev) => (prev === point.key ? "" : point.key))
+                                                                                }
+                                                                                style={{ left: `${point.x}%` }}
+                                                                                title={`${point.label}: ${money(point.total)}`}
+                                                                                aria-label={`${point.label}: ${money(point.total)}`}
+                                                                            >
+                                                                                <span className="lineChartAxisMonth">{point.label}</span>
+                                                                                <span className="lineChartAxisAmount">{money(point.total, "₪")}</span>
+                                                                            </button>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </article>
+
+                                            <article className="card categoryCard">
+                                                <div className="sectionHeader">
+                                                    <h2>פילוח הוצאות לפי קטגוריה</h2>
+                                                    <span className="hint">{categoryChart.slices.length} קטגוריות מוצגות</span>
+                                                </div>
+
+                                                {categoryChart.slices.length === 0 && <div className="emptyState">אין מספיק נתונים להצגת פילוח.</div>}
+
+                                                {categoryChart.slices.length > 0 && (
+                                                    <div className="categoryDonutLayout">
+                                                        <div className="categoryDonutWrap">
+                                                            <svg
+                                                                className="categoryDonutSvg"
+                                                                viewBox="0 0 220 220"
+                                                                role="img"
+                                                                aria-label="פילוח הוצאות לפי קטגוריות"
                                                             >
-                                                                <span className="lineChartAxisMonth">{point.label}</span>
-                                                                <span className="lineChartAxisAmount">{money(point.total, "₪")}</span>
-                                                            </button>
-                                                        );
-                                                    })}
-                                                </div>
+                                                                <circle className="categoryDonutTrack" cx="110" cy="110" r="70" transform="rotate(-90 110 110)" />
+                                                                {categoryChart.slices.map((slice) => (
+                                                                    <circle
+                                                                        key={slice.category}
+                                                                        className="categoryDonutSlice"
+                                                                        cx="110"
+                                                                        cy="110"
+                                                                        r="70"
+                                                                        transform="rotate(-90 110 110)"
+                                                                        stroke={slice.color}
+                                                                        strokeDasharray={slice.dasharray}
+                                                                        strokeDashoffset={slice.dashoffset}
+                                                                    />
+                                                                ))}
+                                                            </svg>
+
+                                                            <div className="categoryDonutCenter">
+                                                                <span>סה"כ בתקופה</span>
+                                                                <strong>{money(categoryChart.total, "₪")}</strong>
+                                                            </div>
+                                                        </div>
+
+                                                        <div className="categoryLegendList">
+                                                            {categoryLegendItems.map((entry) => (
+                                                                <div key={`legend-${entry.category}`} className="categoryLegendItem">
+                                                                    <span className="categoryLegendSwatch" style={{ backgroundColor: entry.color }} />
+                                                                    <div className="categoryLegendMain">
+                                                                        <strong>{entry.category}</strong>
+                                                                        <span>{entry.count} פריטים</span>
+                                                                    </div>
+                                                                    <div className="categoryLegendValues">
+                                                                        <span>{entry.percent.toFixed(1)}%</span>
+                                                                        <strong>{money(entry.total, "₪")}</strong>
+                                                                    </div>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </article>
+                                        </section>
+
+                                        <section className="card chatAssistantCard fadeIn">
+                                            <div className="sectionHeader">
+                                                <h2>צ׳אט תובנות</h2>
+                                                <span className="hint">שאל שאלות על הנתונים שלך</span>
                                             </div>
-                                        </div>
-                                    </div>
-                                )}
-                            </article>
 
-                            <article className="card categoryCard">
-                                <div className="sectionHeader">
-                                    <h2>פילוח הוצאות לפי קטגוריה</h2>
-                                    <span className="hint">{categoryChart.slices.length} קטגוריות מוצגות</span>
-                                </div>
-
-                                {categoryChart.slices.length === 0 && <div className="emptyState">אין מספיק נתונים להצגת פילוח.</div>}
-
-                                {categoryChart.slices.length > 0 && (
-                                    <div className="categoryDonutLayout">
-                                        <div className="categoryDonutWrap">
-                                            <svg
-                                                className="categoryDonutSvg"
-                                                viewBox="0 0 220 220"
-                                                role="img"
-                                                aria-label="פילוח הוצאות לפי קטגוריות"
-                                            >
-                                                <circle className="categoryDonutTrack" cx="110" cy="110" r="70" transform="rotate(-90 110 110)" />
-                                                {categoryChart.slices.map((slice) => (
-                                                    <circle
-                                                        key={slice.category}
-                                                        className="categoryDonutSlice"
-                                                        cx="110"
-                                                        cy="110"
-                                                        r="70"
-                                                        transform="rotate(-90 110 110)"
-                                                        stroke={slice.color}
-                                                        strokeDasharray={slice.dasharray}
-                                                        strokeDashoffset={slice.dashoffset}
-                                                    />
+                                            <div className="chatThread" ref={chatMessagesRef}>
+                                                {chatMessages.map((msg, index) => (
+                                                    <div
+                                                        key={`chat-${index}`}
+                                                        className={`chatBubble ${msg.role === "user" ? "user" : "assistant"}`}
+                                                    >
+                                                        {msg.text}
+                                                    </div>
                                                 ))}
-                                            </svg>
-
-                                            <div className="categoryDonutCenter">
-                                                <span>סה"כ בתקופה</span>
-                                                <strong>{money(categoryChart.total, "₪")}</strong>
+                                                {chatSending && <div className="chatBubble assistant pending">חושב...</div>}
                                             </div>
-                                        </div>
 
-                                        <div className="categoryLegendList">
-                                            {categoryLegendItems.map((entry) => (
-                                                <div key={`legend-${entry.category}`} className="categoryLegendItem">
-                                                    <span className="categoryLegendSwatch" style={{ backgroundColor: entry.color }} />
-                                                    <div className="categoryLegendMain">
-                                                        <strong>{entry.category}</strong>
-                                                        <span>{entry.count} פריטים</span>
-                                                    </div>
-                                                    <div className="categoryLegendValues">
-                                                        <span>{entry.percent.toFixed(1)}%</span>
-                                                        <strong>{money(entry.total, "₪")}</strong>
-                                                    </div>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                )}
-                            </article>
-                            </section>
-                            </>
-                        )}
+                                            {chatError && <div className="chatError">{chatError}</div>}
 
-                        {isAnalysisBillsScreen && (
-                            <>
-                                <section className="card filtersCard">
-
-                            <div className="filtersGrid">
-                                <input
-                                    className="input"
-                                    value={search}
-                                    onChange={(event) => setSearch(event.target.value)}
-                                    placeholder="חיפוש לפי נושא, שולח, שם קובץ או קטגוריה"
-                                />
-
-                                <select className="select" value={category} onChange={(event) => setCategory(event.target.value)}>
-                                    <option value="all">כל הקטגוריות</option>
-                                    {categories.map((option) => (
-                                        <option key={option} value={option}>
-                                            {option}
-                                        </option>
-                                    ))}
-                                </select>
-
-                                <select
-                                    className="select"
-                                    value={statusFilter}
-                                    onChange={(event) => setStatusFilter(event.target.value)}
-                                >
-                                    {STATUS_OPTIONS.map((option) => (
-                                        <option key={option.value} value={option.value}>
-                                            {option.label}
-                                        </option>
-                                    ))}
-                                </select>
-
-                                <select
-                                    className="select"
-                                    value={timeWindow}
-                                    onChange={(event) => setTimeWindow(event.target.value)}
-                                >
-                                    {TIME_WINDOW_OPTIONS.map((option) => (
-                                        <option key={option.value} value={option.value}>
-                                            תקופת זמן: {option.label}
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
-
-                            <div className="chipRow">
-                                {QUICK_FILTERS.map((filter) => (
-                                    <button
-                                        key={filter.value}
-                                        className={`chipButton ${quickFilter === filter.value ? "active" : ""}`}
-                                        onClick={() => setQuickFilter(filter.value)}
-                                    >
-                                        {filter.label}
-                                    </button>
-                                ))}
-                            </div>
-
-                            <div className="filtersActions">
-                                <button className="btnGhost" onClick={clearFilters}>
-                                    נקה פילטרים
-                                </button>
-                                <button className="btnDanger" onClick={cleanDatabase}>
-                                    נקה מסד נתונים
-                                </button>
-                            </div>
-                        </section>
-
-                        <section className="cardsGrid">
-                            {filteredItems.map((item, index) => {
-                                const status = getBillStatus(item);
-                                const fileUrl = fileUrlFromSavedPath(item.saved_path);
-                                const subject = item.subject || item.filename || "ללא נושא";
-
-                                return (
-                                    <article
-                                        key={`${item.stableId}-${item.id || index}`}
-                                        className={`billCard ${status.tone}`}
-                                        style={{ animationDelay: `${Math.min(index * 35, 300)}ms` }}
-                                    >
-                                        <div className="billTopRow">
-                                            <span className="categoryBadge">{item.category || "ללא קטגוריה"}</span>
-                                            <span className={`statusBadge ${status.tone}`}>{status.label}</span>
-                                        </div>
-
-                                        <h3 className="billSubject">{subject}</h3>
-                                        <p className="billSender">{item.sender || "שולח לא זוהה"}</p>
-
-                                        <div className="billAmount">{money(item.amount, item.amount_currency || "₪")}</div>
-
-                                        <div className="billDates">
-                                            <span>יעד: {formatDate(item.dueDate)}</span>
-                                            <span>התקבל: {formatDate(item.msgDate)}</span>
-                                        </div>
-
-                                        <div className="billActions">
-                                            {item.saved_path ? (
-                                                <a className="btnSecondary small" href={fileUrl} target="_blank" rel="noreferrer">
-                                                    פתח קובץ
-                                                </a>
-                                            ) : (
-                                                <button className="btnSecondary small" disabled>
-                                                    אין קובץ
+                                            <div className="chatComposer">
+                                        <textarea
+                                            className="chatInput"
+                                            value={chatInput}
+                                            onChange={(event) => setChatInput(event.target.value)}
+                                            onKeyDown={(event) => {
+                                                if (event.key === "Enter" && !event.shiftKey) {
+                                                    event.preventDefault();
+                                                    sendChatMessage();
+                                                }
+                                            }}
+                                            placeholder="לדוגמה: באיזה קטגוריה הייתה העלייה הגדולה ביותר החודש?"
+                                            rows={2}
+                                        />
+                                                <button
+                                                    className="btnPrimary"
+                                                    onClick={sendChatMessage}
+                                                    disabled={chatSending || !chatInput.trim()}
+                                                >
+                                                    {chatSending ? "שולח..." : "שלח"}
                                                 </button>
+                                            </div>
+                                        </section>
+                                    </>
+                                )}
+
+                                {isAnalysisBillsScreen && (
+                                    <>
+                                        <section className="card filtersCard fadeIn">
+
+                                            <div className="filtersGrid">
+                                                <label className="searchField prominentSearch">
+                                                    <span className="searchIcon" aria-hidden="true">🔎</span>
+                                                    <input
+                                                        className="input searchInput"
+                                                        value={search}
+                                                        onChange={(event) => setSearch(event.target.value)}
+                                                        placeholder="חיפוש לפי נושא, שולח, שם קובץ או קטגוריה"
+                                                    />
+                                                </label>
+
+                                                <select className="select" value={category} onChange={(event) => setCategory(event.target.value)}>
+                                                    <option value="all">כל הקטגוריות</option>
+                                                    {categories.map((option) => (
+                                                        <option key={option} value={option}>
+                                                            {option}
+                                                        </option>
+                                                    ))}
+                                                </select>
+
+                                                <select
+                                                    className="select"
+                                                    value={statusFilter}
+                                                    onChange={(event) => setStatusFilter(event.target.value)}
+                                                >
+                                                    {STATUS_OPTIONS.map((option) => (
+                                                        <option key={option.value} value={option.value}>
+                                                            {option.label}
+                                                        </option>
+                                                    ))}
+                                                </select>
+
+                                                <select
+                                                    className="select"
+                                                    value={timeWindow}
+                                                    onChange={(event) => setTimeWindow(event.target.value)}
+                                                >
+                                                    {TIME_WINDOW_OPTIONS.map((option) => (
+                                                        <option key={option.value} value={option.value}>
+                                                            תקופת זמן: {option.label}
+                                                        </option>
+                                                    ))}
+                                                </select>
+
+                                                <select className="select" value={sortMode} onChange={(event) => setSortMode(event.target.value)}>
+                                                    {SORT_OPTIONS.map((option) => (
+                                                        <option key={option.value} value={option.value}>
+                                                            {option.label}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            </div>
+
+                                            <div className="chipRow">
+                                                {QUICK_FILTERS.map((filter) => (
+                                                    <button
+                                                        key={filter.value}
+                                                        className={`chipButton ${quickFilter === filter.value ? "active" : ""}`}
+                                                        onClick={() => setQuickFilter(filter.value)}
+                                                    >
+                                                        {filter.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+
+                                            <div className="filtersActions">
+                                                <button className="btnGhost" onClick={clearFilters}>
+                                                    נקה פילטרים
+                                                </button>
+                                                <button className="btnDanger" onClick={cleanDatabase}>
+                                                    נקה מסד נתונים
+                                                </button>
+                                            </div>
+                                        </section>
+
+                                        <section className="card tableCard fadeIn">
+                                            <div className="sectionHeader">
+                                                <h2>טבלת חשבוניות</h2>
+                                                <span className="hint">מציג {filteredItems.length} חשבוניות</span>
+                                            </div>
+
+                                            {filteredItems.length === 0 && (
+                                                <div className="emptyState">לא נמצאו חשבונות לפי הסינון הנוכחי.</div>
                                             )}
 
-                                            <button
-                                                className="btnPrimary small"
-                                                onClick={() => togglePaidById(item.stableId, subject)}
-                                            >
-                                                {item.isPaid ? "בטל שולם" : "סמן כשולם"}
-                                            </button>
+                                            {filteredItems.length > 0 && (
+                                                <div className="tableWrap">
+                                                    <table className="billsTable">
+                                                        <thead>
+                                                        <tr>
+                                                            <th>חשבונית</th>
+                                                            <th>קטגוריה</th>
+                                                            <th>סטטוס</th>
+                                                            <th>סכום</th>
+                                                            <th>התקבל</th>
+                                                            <th>פעולות</th>
+                                                        </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                        {filteredItems.map((item, index) => {
+                                                            const status = getBillStatus(item);
+                                                            const fileUrl = fileUrlFromSavedPath(item.saved_path);
+                                                            const subject = item.subject || item.filename || "ללא נושא";
 
-                                            <button className="btnGhost small" onClick={() => createReminder(item)}>
-                                                תזכורת
-                                            </button>
-
-                                        </div>
-                                    </article>
-                                );
-                            })}
-                        </section>
-
-                                {filteredItems.length === 0 && (
-                                    <section className="card emptyState">לא נמצאו חשבונות לפי הסינון הנוכחי.</section>
+                                                            return (
+                                                                <tr
+                                                                    key={`${item.stableId}-${item.id || index}`}
+                                                                    className={`tableRow ${status.tone}`}
+                                                                    style={{ animationDelay: `${Math.min(index * 25, 240)}ms` }}
+                                                                >
+                                                                    <td>
+                                                                        <div className="tableMainCell">
+                                                                            <strong className="tableSubject">{subject}</strong>
+                                                                            <span className="tableSender">{senderDisplay(item.sender)}</span>
+                                                                        </div>
+                                                                    </td>
+                                                                    <td>
+                                                                        <span className="categoryBadge tableBadge">{item.category || "ללא קטגוריה"}</span>
+                                                                    </td>
+                                                                    <td>
+                                                                        <span className={`statusBadge ${status.tone}`}>{status.label}</span>
+                                                                    </td>
+                                                                    <td className="tableAmount">{money(item.amount, item.amount_currency || "₪")}</td>
+                                                                    <td className="tableDate">{formatDate(item.msgDate)}</td>
+                                                                    <td>
+                                                                        <div className="tableActions">
+                                                                            {item.saved_path ? (
+                                                                                <a className="btnSecondary small" href={fileUrl} target="_blank" rel="noreferrer">
+                                                                                    צפייה
+                                                                                </a>
+                                                                            ) : (
+                                                                                <button className="btnSecondary small" disabled>
+                                                                                    אין קובץ
+                                                                                </button>
+                                                                            )}
+                                                                            <button
+                                                                                className="btnPrimary small"
+                                                                                onClick={() => togglePaidById(item.stableId, subject)}
+                                                                            >
+                                                                                {item.isPaid ? "בטל שולם" : "סמן כשולם"}
+                                                                            </button>
+                                                                            <button className="btnGhost small" onClick={() => createReminder(item)}>
+                                                                                תזכורת
+                                                                            </button>
+                                                                        </div>
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        })}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            )}
+                                        </section>
+                                    </>
                                 )}
                             </>
                         )}
-                    </>
-                )}
                     </>
                 )}
             </main>
