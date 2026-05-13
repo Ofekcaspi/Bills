@@ -1,13 +1,14 @@
-import math
 import pickle
 import re
-from collections import Counter
 from pathlib import Path
 
 import pdfplumber
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.pipeline import Pipeline
 
 
-def pdf_words_to_list(pdf_path):
+def pdf_words_to_list(pdf_path: Path):
     words = []
 
     with pdfplumber.open(pdf_path) as pdf:
@@ -18,8 +19,17 @@ def pdf_words_to_list(pdf_path):
 
             for word_data in page_words:
                 if "text" in word_data:
-                    words.append(word_data["text"][::-1])
+                    words.append(word_data["text"])
 
+            print("pdf: ", words[:10])
+
+    return words
+
+
+def txt_words_to_list(txt_path: Path):
+    text = txt_path.read_text(encoding="utf-8", errors="replace")
+    words = [w[::-1] for w in text.split()]
+    print("txt: ", words[:10])
     return words
 
 
@@ -27,13 +37,23 @@ def clean_words(words):
     cleaned = []
 
     for word in words:
-        word = word.strip().lower()
+        original = word.strip()
+
+        if not original:
+            continue
+
+        if re.fullmatch(r"[\w\.-]+@[\w\.-]+\.\w+", original):
+            cleaned.append("<email>")
+            continue
+
+        if re.fullmatch(r"\d+", original):
+            cleaned.append("<number>")
+            continue
+
+        word = original.lower()
         word = re.sub(r"[^\w\u0590-\u05FF]", "", word)
 
         if not word:
-            continue
-
-        if re.fullmatch(r"\d+", word):
             continue
 
         cleaned.append(word)
@@ -41,111 +61,161 @@ def clean_words(words):
     return cleaned
 
 
-def extract_words_from_pdf(pdf_path):
+def extract_words_from_pdf(pdf_path: Path):
     return clean_words(pdf_words_to_list(pdf_path))
 
 
-def get_pdf_files(folder_path):
-    return list(folder_path.glob("*.pdf"))
+def extract_words_from_txt(txt_path: Path):
+    return clean_words(txt_words_to_list(txt_path))
 
 
-class SimpleBayesClassifier:
+def extract_words_from_file(file_path: Path):
+    file_path = Path(file_path)
+    suffix = file_path.suffix.lower()
+
+    if suffix == ".pdf":
+        return extract_words_from_pdf(file_path)
+
+    if suffix == ".txt":
+        return extract_words_from_txt(file_path)
+
+    raise ValueError(f"Unsupported file type: {file_path}")
+
+
+def get_document_files(folder_path: Path):
+    return [
+        p for p in Path(folder_path).iterdir()
+        if p.is_file() and p.suffix.lower() in {".pdf", ".txt"}
+    ]
+
+
+def words_to_document(words):
+    return " ".join(words)
+
+
+class SklearnNaiveBayesClassifier:
     def __init__(self):
-        self.word_counts = {}
-        self.total_words = {}
-        self.document_counts = {}
-        self.vocabulary = set()
-        self.total_documents = 0
+        self.model = Pipeline([
+            (
+                "vectorizer",
+                CountVectorizer(
+                    tokenizer=str.split,
+                    token_pattern=None,
+                    lowercase=False,
+                ),
+            ),
+            ("classifier", MultinomialNB()),
+        ])
+
+        self.is_trained = False
 
     def train_from_folders(self, folders):
+        texts = []
+        labels = []
+
         for label, folder_path in folders.items():
-            self._train_label(label, folder_path)
+            folder_path = Path(folder_path)
 
-    def _train_label(self, label, folder_path):
-        counts = Counter()
-        doc_count = 0
+            for file_path in get_document_files(folder_path):
+                try:
+                    words = extract_words_from_file(file_path)
 
-        for pdf_file in get_pdf_files(folder_path):
-            try:
-                words = extract_words_from_pdf(pdf_file)
-                counts.update(words)
-                self.vocabulary.update(words)
-                doc_count += 1
-            except Exception as e:
-                print(f"Could not read {pdf_file}: {e}")
+                    if not words:
+                        continue
 
-        self.word_counts[label] = counts
-        self.total_words[label] = sum(counts.values())
-        self.document_counts[label] = doc_count
-        self.total_documents += doc_count
+                    texts.append(words_to_document(words))
+                    labels.append(label)
 
-    def classify_text(self, text):
-        words = clean_words(re.findall(r"[\w\u0590-\u05FF]+", text.lower()))
-        log_probs = {}
-        vocab_size = len(self.vocabulary)
+                except Exception as e:
+                    print(f"Could not read {file_path}: {e}")
 
-        for label in self.word_counts:
-            log_probs[label] = self._log_prob(label, words, vocab_size)
+        if not texts:
+            raise ValueError("No training documents found.")
 
-        prediction = max(log_probs, key=log_probs.get)
-        return prediction, log_probs
+        self.model.fit(texts, labels)
+        self.is_trained = True
 
-    def _log_prob(self, label, words, vocab_size):
-        prob_label = self.document_counts[label] / self.total_documents
-        log_prob = math.log(prob_label)
+    def classify_text(self, text: str):
+        words = clean_words(text.split())
+        return self._classify_words(words)
 
-        total_words_in_label = self.total_words[label]
-        word_counts_in_label = self.word_counts[label]
+    def classify_file(self, file_path: Path):
+        words = extract_words_from_file(Path(file_path))
+        return self._classify_words(words)
 
-        for word in words:
-            count_word_in_label = word_counts_in_label.get(word, 0)
-            prob_word_in_label = (count_word_in_label + 1) / (total_words_in_label + vocab_size)
-            log_prob += math.log(prob_word_in_label)
+    def decide_bill_or_receipt_from_words(self, words):
+        RECEIPT_PHRASES = [
+            "אישור קבלת תשלום",
+            "אישור תשלום",
+            "לא לתשלום",
+            "שולם בתאריך",
+            "אישור עסקה",
+            "יתרה לתשלום 0",
+            "חוב 0",
+            "מספר אישור",
+            "תעודת תשלום",
+            "קבלה",
+            "שולם",
+        ]
 
-        return log_prob
+        for pattern in RECEIPT_PHRASES:
+            size = len(pattern)
+
+            for i in range(len(words) - size + 1):
+                if words[i:i + size] == pattern:
+                    return "receipt"
+
+        return "bill"
+    def _classify_words(self, words):
+        if not self.is_trained:
+            raise ValueError("Classifier is not trained.")
+
+        text = words_to_document(words)
+
+        prediction = self.model.predict([text])[0]
+
+        probabilities = self.model.predict_proba([text])[0]
+        classes = self.model.named_steps["classifier"].classes_
+
+        probs = {
+            label: float(prob)
+            for label, prob in zip(classes, probabilities)
+        }
+
+        # financial/general classifier stage
+        if prediction == "financial":
+            prediction = self.decide_bill_or_receipt_from_words(words)
+
+        return prediction, probs
 
 
-def save_model(classifier, model_path):
+def save_model(classifier, model_path: Path):
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+
     with open(model_path, "wb") as f:
         pickle.dump(classifier, f)
 
 
-def load_or_train_classifier(model_path, folders):
+def load_or_train_classifier(model_path: Path, folders):
     if model_path.exists():
         print("Loading model...")
         with open(model_path, "rb") as f:
             return pickle.load(f)
 
     print("Training model...")
-    classifier = SimpleBayesClassifier()
+    classifier = SklearnNaiveBayesClassifier()
     classifier.train_from_folders(folders)
     save_model(classifier, model_path)
     print("Model saved to", model_path)
     return classifier
 
 
-# Paths
-Bills_PATH = Path.cwd() / "BillClassification" / "training_data" / "Bills"
-Receipts_PATH = Path.cwd() / "BillClassification" / "training_data" / "reciepts"
-MODEL_PATH = Path.cwd() / "trained_params.pkl"
+def get_bill_receipt_general_classifier():
+    model_path = Path.cwd() / "Bills" / "bill_receipt_general_sklearn_nb.pkl"
 
-FOLDERS = {
-    "bills": Bills_PATH,
-    "receipts": Receipts_PATH,
-}
+    folders = {
+        "financial": Path.cwd() / "Bills" / "BillClassification" / "training_data" / "bill_receipt_general" / "financial",
+        "general": Path.cwd() / "Bills" / "BillClassification" / "training_data" / "bill_receipt_general" / "general",
+    }
 
-classifier = load_or_train_classifier(MODEL_PATH, FOLDERS)
-
-TEST_PDF = Path.cwd() / "hebrew_invoice_receipt_sample_ezcount.pdf"
-
-# extract words from pdf
-pdf_words = extract_words_from_pdf(TEST_PDF)
-
-# turn into text (space separated)
-pdf_text = " ".join(pdf_words)
-
-# classify
-prediction, log_probs = classifier.classify_text(pdf_text)
-
-print("Prediction:", prediction)
-print("Log probabilities:", log_probs)
+    return load_or_train_classifier(model_path, folders)

@@ -8,7 +8,7 @@ from .views import (
     bills_summary,
     bills_upcoming,
     serve_file,
-    clean_db,
+    clean_db, update_bill_status,
 )
 
 urlpatterns = [
@@ -23,7 +23,7 @@ urlpatterns = [
     path("summary/", bills_summary),
     path("upcoming/", bills_upcoming),
     path("clean-db/", clean_db),
-
+    path("update-bill/", update_bill_status),
     # Files
     path("files/<path:path>", serve_file),
 ]

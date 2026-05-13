@@ -13,7 +13,7 @@ from google.oauth2.credentials import Credentials
 
 from .categorizer import classify_category
 from .pdf_analysis import analyze_pdf, analyze_text
-from .Financial_vs_general_Classifier import get_financial_vs_general_classifier
+from .BillClassifier import get_bill_receipt_general_classifier
 
 
 
@@ -147,7 +147,7 @@ def fetch_invoice_attachments(
 ) -> List[dict]:
     downloads_dir.mkdir(parents=True, exist_ok=True)
     service = build("gmail", "v1", credentials=creds)
-    financial_vs_general = get_financial_vs_general_classifier()
+    bill_classifier = get_bill_receipt_general_classifier()
 
     q = query
 
@@ -217,7 +217,8 @@ def fetch_invoice_attachments(
             if is_pdf and att_id:
                 pdf_parts.append((part, filename, att_id, mime))
 
-        has_financial_pdf = False
+        has_bill_document_pdf = False
+
         # Case 1: email has PDF(s)
         if pdf_parts:
             for part, filename, att_id, mime in pdf_parts:
@@ -236,19 +237,23 @@ def fetch_invoice_attachments(
                 out_path = _make_unique_path(downloads_dir / safe)
                 out_path.write_bytes(file_bytes)
 
-                prediction, _ = financial_vs_general.classify_file(out_path)
-                if prediction != "financial":
+                prediction, _ = bill_classifier.classify_file(out_path)
+                if prediction not in ["bill","receipt"]:
                     continue
+                document_type = prediction.lower().strip()
 
                 analysis = analyze_pdf(out_path)
+
                 amount_value = analysis.get("amount_value")
                 amount_currency = analysis.get("amount_currency")
                 due_date_iso = analysis.get("due_date_iso")
 
                 if amount_value is None:
                     amount_value = body_analysis.get("amount_value")
+
                 if not amount_currency:
                     amount_currency = body_analysis.get("amount_currency")
+
                 if not due_date_iso:
                     due_date_iso = body_analysis.get("due_date_iso")
 
@@ -259,6 +264,7 @@ def fetch_invoice_attachments(
 
                 results.append(
                     {
+                        "document_type": document_type,
                         "message_id": msg_id,
                         "attachment_id": att_id,
                         "subject": subject,
@@ -266,35 +272,45 @@ def fetch_invoice_attachments(
                         "msg_date": msg_date,
                         "filename": out_path.name,
                         "saved_path": f"downloads/{out_path.name}",
+                        "vendor": sender,
                         "category": category,
                         "amount_value": amount_value,
                         "amount_currency": amount_currency,
                         "due_date_iso": due_date_iso,
                     }
                 )
-                has_financial_pdf = True
 
-            # If at least one PDF is financial with amount, keep PDF path as source of truth.
-            if has_financial_pdf:
+                has_bill_document_pdf = True
+
+            # If at least one PDF is financial with amount,
+            # keep PDF path as source of truth.
+            if has_bill_document_pdf:
                 continue
 
-        # Case 2: no PDFs OR PDFs were not financial -> fallback to body text
-        prediction, _ = financial_vs_general.classify_text(email_body_text or "")
-        print('pred: ',prediction)
-        if prediction != "financial":
+        # Case 2: no PDFs -> fallback to body text
+        prediction, _ = bill_classifier.classify_text(email_body_text or "")
+        if prediction not in ["bill","receipt"]:
             continue
+        document_type = prediction.lower().strip()
+
+        print("pred:", document_type)
 
         if body_analysis.get("amount_value") is None:
             continue
 
         safe = _safe_filename(f"{msg_id}_body.txt")
         out_path = _make_unique_path(downloads_dir / safe)
-        out_path.write_text(email_body_text or "", encoding="utf-8")
+
+        out_path.write_text(
+            email_body_text or "",
+            encoding="utf-8",
+            )
 
         category = classify_category(subject, sender, out_path.name)
 
         results.append(
             {
+                "document_type": document_type,
                 "message_id": msg_id,
                 "attachment_id": None,
                 "subject": subject,
@@ -302,11 +318,227 @@ def fetch_invoice_attachments(
                 "msg_date": msg_date,
                 "filename": out_path.name,
                 "saved_path": f"downloads/{out_path.name}",
+                "vendor": sender,
                 "category": category,
                 "amount_value": body_analysis.get("amount_value"),
                 "amount_currency": body_analysis.get("amount_currency"),
                 "due_date_iso": body_analysis.get("due_date_iso"),
             }
         )
-
     return results
+def _user_replied_to_thread(service, thread_id, my_email):
+    thread = service.users().threads().get(
+        userId="me",
+        id=thread_id,
+        format="metadata",
+        metadataHeaders=["From"],
+    ).execute()
+
+    my_email = my_email.lower()
+
+    for msg in thread.get("messages", []):
+        headers = {
+            h["name"].lower(): h["value"]
+            for h in msg.get("payload", {}).get("headers", [])
+        }
+
+        sender = (headers.get("from") or "").lower()
+
+        if my_email in sender:
+            return True
+
+    return False
+def fetch_invoice_attachments(
+        *,
+        creds: Credentials,
+        downloads_dir: Path,
+        query: str,
+        my_email: str,
+        max_results: int = 20,
+        time_window: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+) -> List[dict]:
+    downloads_dir.mkdir(parents=True, exist_ok=True)
+    service = build("gmail", "v1", credentials=creds)
+    bill_classifier = get_bill_receipt_general_classifier()
+
+    q = query
+
+    if start_date and end_date:
+        after = start_date.strftime("%Y/%m/%d")
+        before = (end_date + timedelta(days=1)).strftime("%Y/%m/%d")
+        q = f"{q} after:{after} before:{before}"
+    elif time_window:
+        q = f"{q} newer_than:{time_window}"
+    page_size = max(1, min(int(max_results or 20), 500))
+    msgs: List[dict] = []
+    page_token: Optional[str] = None
+
+    while True:
+        list_kwargs = {
+            "userId": "me",
+            "q": q,
+            "maxResults": page_size,
+        }
+        if page_token:
+            list_kwargs["pageToken"] = page_token
+
+        resp = service.users().messages().list(**list_kwargs).execute()
+        msgs.extend(resp.get("messages", []) or [])
+
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+
+    results: List[dict] = []
+
+    def walk(p):
+        if not p:
+            return
+        yield p
+        for ch in (p.get("parts") or []):
+            yield from walk(ch)
+
+    for m in msgs:
+        msg_id = m["id"]
+        full = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
+        if _user_replied_to_thread(service, full["threadId"], my_email):
+            continue
+        headers = {h["name"].lower(): h["value"] for h in full.get("payload", {}).get("headers", [])}
+        subject = headers.get("subject")
+        sender = headers.get("from")
+        date_raw = headers.get("date")
+        msg_date = _parse_rfc2822_date(date_raw) if date_raw else None
+
+        payload = full.get("payload", {})
+        email_body_text = _extract_email_body_text(service, msg_id, payload)
+
+        body_analysis = analyze_text(
+            email_body_text,
+            source_label=f"email body {msg_id}",
+        )
+
+        pdf_parts = []
+
+        for part in walk(payload):
+            filename = part.get("filename") or ""
+            body = part.get("body") or {}
+            att_id = body.get("attachmentId")
+            mime = part.get("mimeType") or ""
+
+            is_pdf = (mime == "application/pdf") or filename.lower().endswith(".pdf")
+
+            if is_pdf and att_id:
+                pdf_parts.append((part, filename, att_id, mime))
+
+        has_bill_document_pdf = False
+
+        # Case 1: email has PDF(s)
+        if pdf_parts:
+            for part, filename, att_id, mime in pdf_parts:
+                att = service.users().messages().attachments().get(
+                    userId="me",
+                    messageId=msg_id,
+                    id=att_id,
+                ).execute()
+
+                data = att.get("data")
+                if not data:
+                    continue
+
+                file_bytes = base64.urlsafe_b64decode(data.encode("utf-8"))
+                safe = _safe_filename(filename or f"{msg_id}.pdf")
+                out_path = _make_unique_path(downloads_dir / safe)
+                out_path.write_bytes(file_bytes)
+
+                prediction, _ = bill_classifier.classify_file(out_path)
+                if prediction not in ["bill","receipt"]:
+                    continue
+                document_type = prediction.lower().strip()
+
+                analysis = analyze_pdf(out_path)
+
+                amount_value = analysis.get("amount_value")
+                amount_currency = analysis.get("amount_currency")
+                due_date_iso = analysis.get("due_date_iso")
+
+                if amount_value is None:
+                    amount_value = body_analysis.get("amount_value")
+
+                if not amount_currency:
+                    amount_currency = body_analysis.get("amount_currency")
+
+                if not due_date_iso:
+                    due_date_iso = body_analysis.get("due_date_iso")
+
+                if amount_value is None:
+                    continue
+
+                category = classify_category(subject, sender, out_path.name)
+
+                results.append(
+                    {
+                        "document_type": document_type,
+                        "message_id": msg_id,
+                        "attachment_id": att_id,
+                        "subject": subject,
+                        "sender": sender,
+                        "msg_date": msg_date,
+                        "filename": out_path.name,
+                        "saved_path": f"downloads/{out_path.name}",
+                        "vendor": sender,
+                        "category": category,
+                        "amount_value": amount_value,
+                        "amount_currency": amount_currency,
+                        "due_date_iso": due_date_iso,
+                    }
+                )
+
+                has_bill_document_pdf = True
+
+            # If at least one PDF is financial with amount,
+            # keep PDF path as source of truth.
+            if has_bill_document_pdf:
+                continue
+
+        # Case 2: no PDFs -> fallback to body text
+        prediction, _ = bill_classifier.classify_text(email_body_text or "")
+        if prediction not in ["bill","receipt"]:
+            continue
+        document_type = prediction.lower().strip()
+
+        print("pred:", document_type)
+
+        if body_analysis.get("amount_value") is None:
+            continue
+
+        safe = _safe_filename(f"{msg_id}_body.txt")
+        out_path = _make_unique_path(downloads_dir / safe)
+
+        out_path.write_text(
+            email_body_text or "",
+            encoding="utf-8",
+            )
+
+        category = classify_category(subject, sender, out_path.name)
+
+        results.append(
+            {
+                "document_type": document_type,
+                "message_id": msg_id,
+                "attachment_id": None,
+                "subject": subject,
+                "sender": sender,
+                "msg_date": msg_date,
+                "filename": out_path.name,
+                "saved_path": f"downloads/{out_path.name}",
+                "vendor": sender,
+                "category": category,
+                "amount_value": body_analysis.get("amount_value"),
+                "amount_currency": body_analysis.get("amount_currency"),
+                "due_date_iso": body_analysis.get("due_date_iso"),
+            }
+        )
+    return results
+

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone, timezone
 from django.utils import timezone as django_timezone
 from pathlib import Path
 
@@ -12,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.db import connection, transaction
 from .gmailConnect import GmailAuthService
-from  .models import BillDocument,GmailAccount
+from  .models import BillDocument,GmailAccount,Bill,Receipt
 from .gmail_fetcher import fetch_invoice_attachments
 
 
@@ -109,7 +109,65 @@ def window_to_dates(time_window: str | None):
     days = days_map.get(time_window or "30d", 30)
     now = django_timezone.now()
     return now - timedelta(days=days), now
+@api_view(["PATCH"])
+def update_bill_status(request):
+    bill_id = request.data.get("bill_id")
 
+    try:
+        document = BillDocument.objects.get(id=bill_id)
+    except BillDocument.DoesNotExist:
+        return Response(
+            {"error": "Bill document not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    new_status = (request.data.get("status") or "").lower().strip()
+
+    if new_status not in ["bill", "receipt"]:
+        return Response(
+            {"error": "status must be either 'bill' or 'receipt'"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if new_status == "receipt":
+        document.document_type = BillDocument.DocumentType.RECEIPT
+        document.save(update_fields=["document_type"])
+
+        receipt, _ = Receipt.objects.get_or_create(
+            id=document.id,
+            defaults={
+                "paid_at": request.data.get("paid_at") or timezone.now().date(),
+                "payment_method": request.data.get("payment_method"),
+            },
+        )
+
+        receipt.paid_at = request.data.get("paid_at") or receipt.paid_at or timezone.now().date()
+        receipt.payment_method = request.data.get("payment_method", receipt.payment_method)
+        receipt.save()
+
+        document = receipt
+
+    else:
+        document.document_type = BillDocument.DocumentType.BILL
+        document.save(update_fields=["document_type"])
+
+        bill, _ = Bill.objects.get_or_create(id=document.id)
+
+        if request.data.get("due_date") or request.data.get("due_date_iso"):
+            bill.due_date = request.data.get("due_date") or request.data.get("due_date_iso")
+            bill.save()
+
+        document = bill
+
+    return Response(
+        {
+            "message": "Document status updated successfully",
+            "id": document.id,
+            "pk": document.pk,
+            "document": document.to_dict(),
+        },
+        status=status.HTTP_200_OK,
+    )
 
 def calculate_fetch_ranges(gmail_account: GmailAccount, requested_from, requested_until):
     if not gmail_account.synced_from or not gmail_account.synced_until:
@@ -129,12 +187,12 @@ def calculate_fetch_ranges(gmail_account: GmailAccount, requested_from, requeste
         fetch_ranges.append((existing_until, requested_until))
 
     return fetch_ranges
+
 @api_view(["POST"])
 def sync_gmail(request):
     auth = _auth_service()
 
     gmail_account_id = request.session.get("gmail_account_id")
-
     gmail_account = None
 
     if gmail_account_id:
@@ -204,6 +262,7 @@ def sync_gmail(request):
                 "fetched": 0,
                 "created": 0,
                 "updated": 0,
+                "saved_objects": [],
             },
             status=status.HTTP_200_OK,
         )
@@ -215,6 +274,7 @@ def sync_gmail(request):
             creds=creds,
             downloads_dir=settings.BILLS_DOWNLOADS_DIR,
             query=query,
+            my_email=gmail_account.google_email,
             max_results=max_results,
             start_date=fetch_from,
             end_date=fetch_until,
@@ -223,24 +283,44 @@ def sync_gmail(request):
 
     created = 0
     updated = 0
+    saved_objects = []
 
     for r in rows:
-        print(r["subject"])
+        document_type = (r.get("document_type") or "").lower().strip()
 
-        obj, is_created = BillDocument.objects.get_or_create(
+        if document_type == BillDocument.DocumentType.BILL:
+            model_class = Bill
+        elif document_type == BillDocument.DocumentType.RECEIPT:
+            model_class = Receipt
+        else:
+            continue
+
+        defaults = {
+            "document_type": document_type,
+            "subject": r.get("subject"),
+            "sender": r.get("sender"),
+            "msg_date": r.get("msg_date"),
+            "filename": r.get("filename"),
+            "saved_path": r.get("saved_path"),
+            "vendor": r.get("vendor") or r.get("sender"),
+            "category": r.get("category"),
+            "amount_value": r.get("amount_value"),
+            "amount_currency": r.get("amount_currency"),
+            "document_date": r.get("document_date"),
+        }
+
+        if document_type == BillDocument.DocumentType.BILL:
+            defaults["due_date"] = r.get("due_date") or r.get("due_date_iso")
+
+        if document_type == BillDocument.DocumentType.RECEIPT:
+            defaults["paid_at"] = r.get("paid_at")
+            defaults["payment_method"] = r.get("payment_method")
+
+        obj, is_created = model_class.objects.get_or_create(
+            gmail_account=gmail_account,
             message_id=r["message_id"],
-            defaults={
-                "attachment_id": r["attachment_id"],
-                "subject": r["subject"],
-                "sender": r["sender"],
-                "msg_date": r["msg_date"],
-                "filename": r["filename"],
-                "saved_path": r["saved_path"],
-                "category": r["category"],
-                "amount_value": r["amount_value"],
-                "amount_currency": r["amount_currency"],
-                "due_date_iso": r["due_date_iso"],
-            },
+            attachment_id=r.get("attachment_id"),
+            defaults=defaults,
         )
 
         if is_created:
@@ -249,34 +329,23 @@ def sync_gmail(request):
             changed = False
             update_fields = []
 
-            if not obj.category and r.get("category"):
-                obj.category = r["category"]
-                changed = True
-                update_fields.append("category")
-
-            if not obj.saved_path and r.get("saved_path"):
-                obj.saved_path = r["saved_path"]
-                changed = True
-                update_fields.append("saved_path")
-
-            if obj.amount_value is None and r.get("amount_value") is not None:
-                obj.amount_value = r["amount_value"]
-                changed = True
-                update_fields.append("amount_value")
-
-            if not obj.amount_currency and r.get("amount_currency"):
-                obj.amount_currency = r["amount_currency"]
-                changed = True
-                update_fields.append("amount_currency")
-
-            if not obj.due_date_iso and r.get("due_date_iso"):
-                obj.due_date_iso = r["due_date_iso"]
-                changed = True
-                update_fields.append("due_date_iso")
+            for field, value in defaults.items():
+                if value is not None and not getattr(obj, field, None):
+                    setattr(obj, field, value)
+                    changed = True
+                    update_fields.append(field)
 
             if changed:
                 obj.save(update_fields=update_fields)
                 updated += 1
+
+        saved_objects.append({
+            "id": obj.id,
+            "pk": obj.pk,
+            "document_type": document_type,
+            "message_id": obj.message_id,
+            "attachment_id": obj.attachment_id,
+        })
 
     gmail_account.synced_from = (
         min(gmail_account.synced_from, requested_from)
@@ -321,6 +390,7 @@ def sync_gmail(request):
             "fetched": len(rows),
             "created": created,
             "updated": updated,
+            "saved_objects": saved_objects,
         },
         status=status.HTTP_200_OK,
     )
@@ -367,11 +437,11 @@ def bills_upcoming(request):
     limit = now + timedelta(days=days)
 
     items = []
-    for b in BillDocument.objects.all():
-        if not b.due_date_iso:
+    for b in Bill.objects.all():
+        if not b.due_date:
             continue
         try:
-            d = datetime.fromisoformat(b.due_date_iso)
+            d = datetime.fromisoformat(b.due_date)
             if d.tzinfo is None:
                 d = d.replace(tzinfo=dt_timezone.utc)
             if now <= d <= limit:
@@ -418,7 +488,6 @@ def clean_db(request):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
-    # Ensure we're actually using SQLite
     if connection.vendor != "sqlite":
         return Response(
             {"error": f"clean_db is intended for SQLite, but current DB vendor is '{connection.vendor}'"},
@@ -430,11 +499,22 @@ def clean_db(request):
 
         with transaction.atomic():
             with connection.cursor() as cursor:
-                # SQLite supports multiple statements via executescript
                 cursor.executescript(sql)
 
+            # reset gmail sync tracking
+            GmailAccount.objects.all().update(
+                synced_from=None,
+                synced_until=None,
+                last_synced_at=None,
+                last_sync_window=None,
+                last_sync_count=0,
+            )
+
         return Response(
-            {"message": "SQLite database cleaned successfully"},
+            {
+                "message": "SQLite database cleaned successfully",
+                "gmail_accounts_reset": True,
+            },
             status=status.HTTP_200_OK,
         )
 

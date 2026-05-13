@@ -1,89 +1,109 @@
 from __future__ import annotations
+
 import re
 from datetime import date
 from pathlib import Path
+
 import pdfplumber
 
 HEBREW_WORD_PATTERN = re.compile(r"[\u0590-\u05FF]+")
 HAS_HEBREW_PATTERN = re.compile(r"[\u0590-\u05FF]")
 CONTROL_MARKS_PATTERN = re.compile(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
-NUMBER_PATTERN_TEXT = r"\(?-?\d{1,3}(?:[,\s]\d{3})*(?:[.,]\d{1,2})\)?|\(?-?\d+(?:[.,]\d{1,2})\)?"
-NUMBER_PATTERN = re.compile(NUMBER_PATTERN_TEXT)
+
 DATE_PATTERN_TEXT = r"\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2}"
-EXPLICIT_NUMBER_PATTERN_TEXT = r"\(?-?\d{1,3}(?:[,\s]\d{3})*(?:[.,]\d{1,2})?\)?|\(?-?\d+(?:[.,]\d{1,2})?\)?"
+DATE_PATTERN = re.compile(DATE_PATTERN_TEXT)
 
-HEB_LETASHLUM = "\u05DC\u05EA\u05E9\u05DC\u05D5\u05DD"
-HEB_SAHAK = "\u05E1\u05D4\"\u05DB"
-HEB_SAHAK_NOQUOTE = "\u05E1\u05D4\u05DB"
-HEB_KSAH = "\u05DB\"\u05E1\u05D4"
-HEB_SAK_HAKOL = "\u05E1\u05DA \u05D4\u05DB\u05DC"
-HEB_KOLEL = "\u05DB\u05D5\u05DC\u05DC"
-HEB_SUM_PAID = "\u05E1\u05DB\u05D5\u05DD \u05E9\u05E9\u05D5\u05DC\u05DD"
-HEB_KOTSH = "\u05E7\u05D5\u05D8\"\u05E9"
-HEB_KOTSH_NOQUOTE = "\u05E7\u05D5\u05D8\u05E9"
-HEB_YAMIM = "\u05D9\u05DE\u05D9\u05DD"
-HEB_SHAOT = "\u05E9\u05E2\u05D5\u05EA"
+# Number forms accepted as money candidates:
+#   12
+#   12.5
+#   12.50
+#   1,234.56
+#   1.234,56
+#   1 234,56
+#   (123.45)
+# We still validate context before accepting them as amounts.
+AMOUNT_NUMBER_TEXT = r"\(?-?\d{1,3}(?:[,\.\s]\d{3})+(?:[,.]\d{1,2})?\)?|\(?-?\d+(?:[,.]\d{1,2})?\)?"
+AMOUNT_NUMBER_PATTERN = re.compile(AMOUNT_NUMBER_TEXT)
 
-PAYMENT_KEYWORDS = (
+HEB_LETASHLUM = "\u05DC\u05EA\u05E9\u05DC\u05D5\u05DD"  # לתשלום
+HEB_SAHAK = "\u05E1\u05D4\"\u05DB"  # סה"כ
+HEB_SAHAK_NOQUOTE = "\u05E1\u05D4\u05DB"  # סהכ
+HEB_KSAH = "\u05DB\"\u05E1\u05D4"  # כ"סה
+HEB_SAK_HAKOL = "\u05E1\u05DA \u05D4\u05DB\u05DC"  # סך הכל
+HEB_KOLEL = "\u05DB\u05D5\u05DC\u05DC"  # כולל
+HEB_SUM_PAID = "\u05E1\u05DB\u05D5\u05DD \u05E9\u05E9\u05D5\u05DC\u05DD"  # סכום ששולם
+HEB_MECHIR = "\u05DE\u05D7\u05D9\u05E8"  # מחיר
+HEB_YITRA = "\u05D9\u05EA\u05E8\u05D4"  # יתרה
+HEB_LCHIYUV = "\u05DC\u05D7\u05D9\u05D5\u05D1"  # לחיוב
+HEB_TASHLUM = "\u05EA\u05E9\u05DC\u05D5\u05DD"  # תשלום
+HEB_HASHBONIT = "\u05D7\u05E9\u05D1\u05D5\u05E0\u05D9\u05EA"  # חשבונית
+HEB_KABALA = "\u05E7\u05D1\u05DC\u05D4"  # קבלה
+HEB_KOTSH = "\u05E7\u05D5\u05D8\"\u05E9"  # קוט"ש
+HEB_KOTSH_NOQUOTE = "\u05E7\u05D5\u05D8\u05E9"  # קוטש
+HEB_YAMIM = "\u05D9\u05DE\u05D9\u05DD"  # ימים
+HEB_SHAOT = "\u05E9\u05E2\u05D5\u05EA"  # שעות
+
+TOTAL_KEYWORDS = (
     HEB_SUM_PAID,
     HEB_LETASHLUM,
     f"{HEB_SAHAK} {HEB_LETASHLUM}",
     f"{HEB_SAHAK_NOQUOTE} {HEB_LETASHLUM}",
     f"{HEB_KSAH} {HEB_LETASHLUM}",
-    "amount paid",
-    "total paid",
-    "amount due",
-    "payment due",
-    "total due",
-    "balance due",
-)
-TOTAL_KEYWORDS = (
-    HEB_SUM_PAID,
     HEB_SAHAK,
     HEB_SAHAK_NOQUOTE,
     HEB_KSAH,
     HEB_SAK_HAKOL,
-    "total",
-    "grand total",
     HEB_KOLEL,
+    HEB_MECHIR,
+    HEB_YITRA,
+    HEB_LCHIYUV,
+    HEB_TASHLUM,
+    "amount paid",
+    "total paid",
+    "paid amount",
+    "amount due",
+    "payment due",
+    "total due",
+    "balance due",
+    "grand total",
+    "total",
+    "subtotal",
 )
+
 NOISE_KEYWORDS = (
     HEB_KOTSH,
     HEB_KOTSH_NOQUOTE,
-    "kwh",
-    "kva",
-    "kw ",
     HEB_YAMIM,
     HEB_SHAOT,
+    "kwh",
+    "kva",
+    " kw",
+    "kw ",
+    "meter",
+    "reading",
+    "account number",
+    "invoice number",
+    "order number",
+    "customer number",
+    "מספר",
+    "מונה",
+    "קריאה",
 )
 
+# Currency can appear before or after the amount.
 CURRENCY_PATTERNS = {
     "ILS": re.compile(
-        r"(\u20AA|¤|\u05E9\"?\u05D7|\u05D7\"?\u05E9|\u05E9\u05D7|\u05D7\u05E9|nis|ils)",
+        r"(₪|\bnis\b|\bils\b|\bils\.\b|\bshakel\b|\bshekel\b|\bshekels\b|\u05E9\"?\u05D7|\u05D7\"?\u05E9|\u05E9\u05D7|\u05D7\u05E9)",
         re.IGNORECASE,
     ),
-    "USD": re.compile(r"(\$|usd)", re.IGNORECASE),
-    "EUR": re.compile(r"(\u20AC|eur)", re.IGNORECASE),
+    "USD": re.compile(r"(\$|\busd\b|\bus\$\b|\bdollar\b|\bdollars\b)", re.IGNORECASE),
+    "EUR": re.compile(r"(€|\beur\b|\beuro\b|\beuros\b)", re.IGNORECASE),
+    "GBP": re.compile(r"(£|\bgbp\b|\bpound\b|\bpounds\b)", re.IGNORECASE),
 }
 
-EXPLICIT_TOTAL_LABEL_PATTERN = (
-    "(?:"
-    "\u05E1\u05DB\u05D5\u05DD\\s+\u05E9\u05E9\u05D5\u05DC\u05DD"  # סכום ששולם
-    "|"
-    "\u05E1\u05D4\"?\u05DB\\s+\u05DC\u05EA\u05E9\u05DC\u05D5\u05DD"  # סה"כ לתשלום
-    "|amount\\s*paid"
-    "|total\\s*paid"
-    "|paid\\s*amount"
-    "|total\\s*due"
-    "|payment\\s*due"
-    "|balance\\s*due"
-    ")"
-)
-EXPLICIT_TOTAL_PATTERNS = (
-    re.compile(
-        rf"{EXPLICIT_TOTAL_LABEL_PATTERN}[^\d\r\n]{{0,80}}(?P<amount>{EXPLICIT_NUMBER_PATTERN_TEXT})",
-        re.IGNORECASE,
-    ),
+CURRENCY_TOKEN_PATTERN = re.compile(
+    r"₪|\$|€|£|\b(?:nis|ils|usd|eur|gbp|shekel|shekels|dollar|dollars|euro|euros|pound|pounds)\b|\u05E9\"?\u05D7|\u05D7\"?\u05E9|\u05E9\u05D7|\u05D7\u05E9",
+    re.IGNORECASE,
 )
 
 DUE_LABEL_PATTERN = (
@@ -135,11 +155,6 @@ def _reverse_text_for_print(text: str) -> str:
     return "\n".join(fixed_lines)
 
 
-def _normalize_text_for_parsing(text: str) -> str:
-    normalized = _reverse_text_for_print(text)
-    return _clean_text(normalized)
-
-
 def _clean_text(text: str) -> str:
     if not text:
         return ""
@@ -148,33 +163,45 @@ def _clean_text(text: str) -> str:
     return cleaned
 
 
+def _normalize_text_for_parsing(text: str) -> str:
+    normalized = _reverse_text_for_print(text)
+    return _clean_text(normalized)
+
+
 def _parse_amount_number(token: str) -> float | None:
     s = token.strip()
     negative = s.startswith("(") and s.endswith(")")
     s = s.strip("()")
+
     if s.startswith("-"):
         negative = True
         s = s[1:]
+
     s = s.replace(" ", "")
     if not s:
         return None
 
+    # 1,234.56 or 1.234,56
     if "," in s and "." in s:
         if s.rfind(",") > s.rfind("."):
             s = s.replace(".", "").replace(",", ".")
         else:
             s = s.replace(",", "")
     elif "," in s:
-        comma_parts = s.split(",")
-        if len(comma_parts[-1]) in (1, 2):
-            s = "".join(comma_parts[:-1]) + "." + comma_parts[-1]
+        parts = s.split(",")
+        if len(parts[-1]) in (1, 2):
+            s = "".join(parts[:-1]) + "." + parts[-1]
         else:
             s = s.replace(",", "")
+    elif s.count(".") > 1:
+        # 1.234.567 -> thousands separators
+        s = s.replace(".", "")
 
     try:
         value = float(s)
     except ValueError:
         return None
+
     return -value if negative else value
 
 
@@ -185,87 +212,100 @@ def _detect_currency(text: str) -> str | None:
     return None
 
 
-def _extract_explicit_total_amount(text: str) -> tuple[float | None, str | None]:
-    candidates: list[tuple[float, str | None]] = []
-    for pattern in EXPLICIT_TOTAL_PATTERNS:
-        for match in pattern.finditer(text):
-            raw_amount = match.group("amount")
-            value = _parse_amount_number(raw_amount)
-            if value is None or value <= 0:
-                continue
-            if value > 200_000:
-                continue
-
-            start, end = match.span("amount")
-            if end < len(text) and text[end].isdigit():
-                continue
-            tail = text[end: end + 4]
-            if tail[:1] in {"/", "-", "."} and re.match(r"\d{1,2}", tail[1:]):
-                continue
-            if "." not in raw_amount and "," not in raw_amount and 1900 <= value <= 2100:
-                continue
-
-            context = text[max(0, start - 30): min(len(text), end + 30)]
-            currency = _detect_currency(context)
-            candidates.append((value, currency))
-
-    if not candidates:
-        return None, None
-
-    best_value, best_currency = max(candidates, key=lambda item: item[0])
-    return round(best_value, 2), best_currency
+def _spans_for(pattern: re.Pattern, text: str) -> list[tuple[int, int]]:
+    return [m.span() for m in pattern.finditer(text)]
 
 
-def _score_amount_candidate(context: str, value: float) -> int:
+def _inside_any_span(start: int, end: int, spans: list[tuple[int, int]]) -> bool:
+    return any(start >= span_start and end <= span_end for span_start, span_end in spans)
+
+
+def _looks_like_year(value: float, raw: str) -> bool:
+    return "." not in raw and "," not in raw and 1900 <= value <= 2100
+
+
+def _looks_like_identifier(context: str) -> bool:
     ctx = context.lower()
-    score = 0
+    return any(keyword in ctx for keyword in NOISE_KEYWORDS)
 
-    if any(keyword in ctx for keyword in PAYMENT_KEYWORDS):
-        score += 12
-    if any(keyword in ctx for keyword in TOTAL_KEYWORDS):
-        score += 5
-    if _detect_currency(context):
-        score += 3
 
-    if any(keyword in ctx for keyword in NOISE_KEYWORDS):
-        score -= 5
-    if "%" in ctx:
-        score -= 2
-    if value <= 0:
-        score -= 6
-    if value > 200_000:
-        score -= 3
+def _money_candidates(text: str):
+    """
+    Yield money-like candidates only. A number is accepted when either:
+      1. it has a currency token close to it, or
+      2. it has a strong total/payment label close to it.
 
-    return score
+    This intentionally avoids treating arbitrary dates, IDs, quantities, and counts as amounts.
+    """
+    date_spans = _spans_for(DATE_PATTERN, text)
+
+    for match in AMOUNT_NUMBER_PATTERN.finditer(text):
+        raw = match.group(0)
+        start, end = match.span()
+
+        if _inside_any_span(start, end, date_spans):
+            continue
+
+        value = _parse_amount_number(raw)
+        if value is None or value <= 0:
+            continue
+
+        if value > 200_000:
+            continue
+
+        if _looks_like_year(value, raw):
+            continue
+
+        # Avoid fragments in dates like 10/05/2026 even if the regex saw just "10".
+        before = text[max(0, start - 1):start]
+        after = text[end:end + 1]
+        if before in {"/", "-"} or after in {"/", "-"}:
+            continue
+
+        context = text[max(0, start - 80): min(len(text), end + 80)]
+        tight_context = text[max(0, start - 15): min(len(text), end + 15)]
+
+        if "%" in tight_context:
+            continue
+
+        currency = _detect_currency(tight_context) or _detect_currency(context)
+        has_currency_nearby = currency is not None
+        has_total_label_nearby = any(keyword in context.lower() for keyword in TOTAL_KEYWORDS)
+
+        if not has_currency_nearby and not has_total_label_nearby:
+            continue
+
+        score = 0
+        if has_currency_nearby:
+            score += 10
+        if has_total_label_nearby:
+            score += 8
+        if any(keyword in context.lower() for keyword in ("grand total", "total due", "balance due", HEB_LETASHLUM, HEB_SAHAK, HEB_SAHAK_NOQUOTE)):
+            score += 5
+        if _looks_like_identifier(context):
+            score -= 8
+        if DATE_PATTERN.search(context):
+            score -= 4
+
+        yield {
+            "score": score,
+            "value": round(value, 2),
+            "currency": currency,
+            "raw": raw,
+            "context": context,
+        }
 
 
 def _extract_amount_and_currency_with_meta(text: str) -> tuple[float | None, str | None, bool]:
-    explicit_amount, explicit_currency = _extract_explicit_total_amount(text)
-    if explicit_amount is not None:
-        return explicit_amount, explicit_currency or _detect_currency(text), True
+    candidates = list(_money_candidates(text))
 
-    best: tuple[int, float, str | None] | None = None
+    if not candidates:
+        return None, _detect_currency(text), False
 
-    for match in NUMBER_PATTERN.finditer(text):
-        value = _parse_amount_number(match.group(0))
-        if value is None:
-            continue
-
-        start, end = match.span()
-        context = text[max(0, start - 80): min(len(text), end + 80)]
-        score = _score_amount_candidate(context, value)
-        currency = _detect_currency(context)
-
-        candidate = (score, value, currency)
-        if best is None or (candidate[0], candidate[1]) > (best[0], best[1]):
-            best = candidate
-
-    if best is None:
-        return None, None, False
-
-    amount_value = round(best[1], 2)
-    amount_currency = best[2] or _detect_currency(text)
-    return amount_value, amount_currency, False
+    # Prefer stronger context; if tied, prefer the larger money value because totals are
+    # usually larger than tax, line items, discounts, or fees.
+    best = max(candidates, key=lambda c: (c["score"], c["value"]))
+    return best["value"], best["currency"] or _detect_currency(text), best["score"] >= 15
 
 
 def _extract_amount_and_currency(text: str) -> tuple[float | None, str | None]:
@@ -352,10 +392,7 @@ def extract_text_from_pdf(path: str | Path) -> str:
         print(f"[PDF_ANALYSIS] failed to extract text from {pdf_path}: {exc}")
         return ""
 
-    text = "\n".join(t for t in page_texts if t).strip()
-
-
-    return text
+    return "\n".join(t for t in page_texts if t).strip()
 
 
 def analyze_text(text: str, *, source_label: str = "text") -> dict:
@@ -385,8 +422,6 @@ def analyze_text(text: str, *, source_label: str = "text") -> dict:
     )
     amount_currency = primary.get("amount_currency") or secondary.get("amount_currency")
     due_date_iso = primary.get("due_date_iso") or secondary.get("due_date_iso")
-
-
 
     return {
         "text": cleaned_text,
