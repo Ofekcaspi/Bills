@@ -227,6 +227,7 @@ def sync_gmail(request):
 
     query = request.data.get("query") or (
         '(invoice OR receipt OR "חשבונית" OR "קבלה" OR "Order" OR "הזמנה" OR "חשבונית מס" OR "Tax Invoice")'
+        'NOT subject:(פרסומת)'
     )
 
     max_results = int(request.data.get("max_results") or 20)
