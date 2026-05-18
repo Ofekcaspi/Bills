@@ -23,6 +23,8 @@
   --emerald-soft: #e8f2ee;
   --radius-xl: 22px;
   --radius-lg: 16px;
+  --side-nav-width: 188px;
+  --side-layout-gap: 1.25rem;
 }
 
 * {
@@ -80,18 +82,19 @@ body {
 .topbar {
   position: sticky;
   top: 0;
-  z-index: 20;
+  z-index: 30;
   border-bottom: 1px solid rgba(148, 163, 184, 0.28);
   backdrop-filter: blur(18px);
   background: rgba(248, 251, 255, 0.92);
+  padding-block: 0;
 }
 
 .topbarInner {
   display: grid;
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  gap: 0.44rem;
-  padding: 0.04rem 0;
+  gap: 0.24rem;
+  padding: 0;
 }
 
 .eyebrow {
@@ -123,7 +126,7 @@ body {
   flex-direction: column;
   justify-content: center;
   align-items: center;
-  padding: 0.02rem 0.56rem;
+  padding: 0;
 }
 
 .projectLogo {
@@ -135,31 +138,38 @@ body {
   transform: scale(1.14);
   transform-origin: center;
   filter: drop-shadow(0 6px 12px rgba(37, 99, 235, 0.2));
-  margin: 0;
+  margin: -0.3rem 0 -0.24rem;
 }
 
 .sideNav {
   position: fixed;
-  top: 4.6rem;
-  right: 0.7rem;
+  top: 0;
+  right: 0;
+  bottom: 0;
   z-index: 28;
   display: flex;
   flex-direction: column;
   gap: 0.52rem;
-  border: 1px solid #cbd5e1;
-  border-radius: 18px;
-  padding: 0.62rem;
-  background: rgba(255, 255, 255, 0.95);
-  box-shadow: var(--shadow-md);
+  width: var(--side-nav-width);
+  height: 100vh;
+  padding: 5rem 0.62rem 0.72rem;
+  border-left: 1px solid rgba(30, 58, 138, 0.34);
+  border-right: 0;
+  border-top: 0;
+  border-bottom: 0;
+  border-radius: 0;
+  background: linear-gradient(135deg, var(--primary), var(--primary-strong));
+  box-shadow: 0 10px 20px rgba(30, 58, 138, 0.18);
   backdrop-filter: blur(10px);
 }
 
 .sideNavButton {
-  min-width: 170px;
-  border: 1px solid transparent;
+  min-width: 0;
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.3);
   border-radius: 12px;
-  background: transparent;
-  color: var(--text);
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
   font-family: inherit;
   font-size: 0.86rem;
   font-weight: 700;
@@ -167,6 +177,7 @@ body {
   padding: 0.52rem 0.58rem;
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 0.56rem;
   text-align: right;
   cursor: pointer;
@@ -175,24 +186,24 @@ body {
 
 .sideNavButton:hover {
   transform: translateY(-1px) translateX(-2px);
-  border-color: #93c5fd;
-  background: #eff6ff;
-  box-shadow: 0 6px 14px rgba(37, 99, 235, 0.12);
+  border-color: rgba(255, 255, 255, 0.62);
+  background: rgba(255, 255, 255, 0.24);
+  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.16);
 }
 
 .sideNavButton.active {
-  border-color: #60a5fa;
-  background: linear-gradient(90deg, #dbeafe, #eff6ff);
-  color: #1d4ed8;
-  box-shadow: inset 3px 0 0 #2563eb;
+  border-color: #ffffff;
+  background: #ffffff;
+  color: var(--primary-strong);
+  box-shadow: inset 3px 0 0 #2563eb, 0 8px 18px rgba(15, 23, 42, 0.16);
 }
 
 .sideNavIcon {
   width: 1.72rem;
   height: 1.72rem;
   border-radius: 10px;
-  border: 1px solid #bfdbfe;
-  background: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.2);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -200,8 +211,8 @@ body {
 }
 
 .sideNavButton.active .sideNavIcon {
-  border-color: #60a5fa;
-  background: #f0f9ff;
+  border-color: #93c5fd;
+  background: #eff6ff;
 }
 
 .sideNavIconSvg {
@@ -215,6 +226,7 @@ body {
 }
 
 .sideNavLabel {
+  line-height: 1.2;
   white-space: nowrap;
 }
 
@@ -270,7 +282,17 @@ body {
   display: flex;
   align-items: center;
   gap: 0.42rem;
-  position: relative;
+  position: fixed;
+  top: 0.62rem;
+  left: 0.75rem;
+  z-index: 40;
+  transition: opacity 160ms ease, visibility 160ms ease;
+}
+
+.page.isScrolled .topActions {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .topActions .btnPrimary {
@@ -285,7 +307,145 @@ body {
 }
 
 .withSideNav {
-  padding-inline-end: 10.25rem;
+  width: min(1420px, calc(100vw - var(--side-nav-width) - var(--side-layout-gap)));
+  max-width: none;
+  margin-inline-start: auto;
+  margin-inline-end: calc(var(--side-layout-gap) / 2);
+  padding-inline-end: 0;
+}
+
+.analysisChartsPage {
+  height: auto;
+  overflow: visible;
+}
+
+.analysisChartsPage .analysisChartsMain {
+  width: min(1420px, calc(100vw - var(--side-nav-width) - var(--side-layout-gap)));
+  max-width: none;
+  margin-inline-start: auto;
+  margin-inline-end: calc(var(--side-layout-gap) / 2);
+  padding-inline-end: 0;
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+  padding-top: 0.42rem;
+  padding-bottom: 0.42rem;
+  gap: 0.5rem;
+}
+
+.analysisChartsPage .analysisChartsKpiGrid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.analysisChartsPage .analysisChartsKpiGrid .kpiCard {
+  padding: 0.6rem 0.66rem;
+  min-height: 92px;
+}
+
+.analysisChartsPage .analysisChartsKpiGrid .kpiValue {
+  margin-top: 0.2rem;
+  font-size: 1.28rem;
+}
+
+.analysisChartsPage .analysisChartsFiltersCard {
+  padding: 0.5rem;
+}
+
+.analysisChartsPage .analysisChartsInsightsGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.analysisChartsPage .analysisChartsPanelCard {
+  padding: 0.58rem;
+  min-height: 286px;
+}
+
+.analysisChartsPage .analysisChartsPanelCard h2 {
+  font-size: 1rem;
+}
+
+.analysisChartsPage .analysisChartsPanelCard .hint {
+  font-size: 0.76rem;
+}
+
+.analysisChartsPage .lineChart {
+  margin-top: 0.24rem;
+  gap: 0.18rem;
+}
+
+.analysisChartsPage .lineChartCanvas {
+  padding: 0.24rem;
+}
+
+.analysisChartsPage .lineChartAxis {
+  height: 2.1rem;
+}
+
+.analysisChartsPage .lineChartAxisLabel {
+  padding: 0.12rem 0.2rem;
+}
+
+.analysisChartsPage .lineChartAxisMonth {
+  font-size: 0.64rem;
+}
+
+.analysisChartsPage .lineChartAxisAmount {
+  font-size: 0.56rem;
+}
+
+.analysisChartsPage .categoryDonutLayout {
+  grid-template-columns: minmax(170px, 0.68fr) minmax(0, 1fr);
+  gap: 0.34rem;
+}
+
+.analysisChartsPage .categoryDonutWrap {
+  max-width: 204px;
+}
+
+.analysisChartsPage .categoryLegendList {
+  gap: 0.2rem;
+}
+
+.analysisChartsPage .categoryLegendItem {
+  padding: 0.3rem 0.42rem;
+  min-height: 2.18rem;
+}
+
+.analysisChartsPage .categoryLegendMain strong {
+  font-size: 0.74rem;
+}
+
+.analysisChartsPage .categoryLegendMain span,
+.analysisChartsPage .categoryLegendValues span,
+.analysisChartsPage .categoryLegendValues strong {
+  font-size: 0.68rem;
+}
+
+.analysisChartsPage .analysisChartsChatDock {
+  position: static;
+  width: min(440px, 100%);
+  margin-inline-start: 0;
+  margin-inline-end: auto;
+  z-index: auto;
+  border-color: #bbf7d0;
+  background: linear-gradient(180deg, #f0fdf4, #ffffff);
+  box-shadow: var(--shadow-lg);
+}
+
+.analysisChartsPage .analysisChartsChatDock .sectionHeader h2 {
+  font-size: 1.04rem;
+}
+
+.analysisChartsPage .analysisChartsChatDock .chatThread {
+  max-height: 110px;
+}
+
+.analysisChartsPage .analysisChartsChatDock .chatInput {
+  min-height: 54px;
 }
 
 .card {
@@ -321,13 +481,13 @@ body {
 .kpiGrid {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 0.78rem;
+  gap: 0.58rem;
 }
 
 .kpiCard {
   border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
-  padding: 0.88rem 0.82rem;
+  border-radius: 13px;
+  padding: 0.64rem 0.66rem;
   background: linear-gradient(160deg, #ffffff, #f3f8ff);
   box-shadow: var(--shadow-soft);
   animation: riseIn 380ms ease both;
@@ -341,30 +501,30 @@ body {
 
 .kpiLabel {
   color: var(--muted);
-  font-size: 0.76rem;
+  font-size: 0.72rem;
   display: flex;
   align-items: center;
-  gap: 0.34rem;
+  gap: 0.24rem;
   font-weight: 700;
 }
 
 .kpiValue {
-  margin-top: 0.38rem;
-  font-size: clamp(1.26rem, 2vw, 1.78rem);
+  margin-top: 0.24rem;
+  font-size: clamp(1.14rem, 1.7vw, 1.56rem);
   font-weight: 800;
   letter-spacing: 0;
 }
 
 .kpiLabelIcon {
-  width: 1.04rem;
-  height: 1.04rem;
-  border-radius: 7px;
+  width: 0.92rem;
+  height: 0.92rem;
+  border-radius: 6px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   background: #eef2ff;
   color: #1d4ed8;
-  font-size: 0.74rem;
+  font-size: 0.66rem;
 }
 
 .kpiCard.amount {
@@ -546,8 +706,8 @@ body {
 }
 
 .chartCard {
-  border-color: #dccdb8;
-  background: linear-gradient(180deg, #ffffff, #fbf6ee 110%);
+  border-color: var(--line);
+  background: #ffffff;
 }
 
 .lineChart {
@@ -564,16 +724,30 @@ body {
 
 .lineChartTrack {
   position: relative;
-  min-width: 0;
+  min-width: 100%;
   width: 100%;
+}
+
+.lineChartTrack.dense {
+  min-width: 100%;
+}
+
+.lineChartTrack.dense .lineChartPoint {
+  width: 10px;
+  height: 10px;
+  border-width: 2px;
+}
+
+.lineChartTrack.dense .lineChartAxisMonth {
+  font-size: 0.62rem;
 }
 
 .lineChartCanvas {
   position: relative;
   padding: 0.35rem;
-  border: 1px solid #ddcfbb;
+  border: 1px solid #dbe4f3;
   border-radius: 14px;
-  background: linear-gradient(180deg, #ffffff, #f9f2e6 100%);
+  background: #ffffff;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 10px 20px rgba(43, 32, 22, 0.06);
 }
 
@@ -584,14 +758,14 @@ body {
 }
 
 .lineChartGrid {
-  stroke: #dccfbc;
+  stroke: #dbe4f3;
   stroke-width: 0.7;
   stroke-dasharray: 2.4 2.4;
   vector-effect: non-scaling-stroke;
 }
 
 .lineChartArea {
-  fill: rgba(194, 135, 47, 0.2);
+  fill: rgba(29, 78, 216, 0.14);
 }
 
 .lineChartStroke {
@@ -965,6 +1139,15 @@ body {
   display: flex;
   gap: 0.52rem;
   justify-content: flex-end;
+}
+
+.reportErrorBox {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #991b1b;
+  border-radius: 12px;
+  padding: 0.5rem 0.62rem;
+  font-size: 0.84rem;
 }
 
 .categoryBadge,
@@ -1377,6 +1560,11 @@ body {
 }
 
 @media (max-width: 1100px) {
+  :root {
+    --side-nav-width: 164px;
+    --side-layout-gap: 1rem;
+  }
+
   .topbarInner {
     grid-template-columns: minmax(44px, 1fr) auto minmax(140px, 1fr);
     padding: 0.04rem 0;
@@ -1392,16 +1580,29 @@ body {
   }
 
   .sideNav {
-    top: 4.45rem;
-    right: 0.6rem;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: var(--side-nav-width);
+    gap: 0.44rem;
+    padding: 4.75rem 0.46rem 0.58rem;
   }
 
   .sideNavButton {
-    min-width: 156px;
+    font-size: 0.82rem;
+    min-width: 0;
+    padding: 0.44rem 0.46rem;
+  }
+
+  .sideNavLabel {
+    white-space: normal;
   }
 
   .withSideNav {
-    padding-inline-end: 10rem;
+    width: min(100%, calc(100vw - var(--side-nav-width) - var(--side-layout-gap)));
+    margin-inline-start: auto;
+    margin-inline-end: calc(var(--side-layout-gap) / 2);
+    padding-inline-end: 0;
   }
 
   .kpiGrid {
@@ -1436,23 +1637,72 @@ body {
     grid-column: 1 / -1;
   }
 
+  .analysisChartsPage {
+    height: auto;
+    overflow: visible;
+  }
+
+  .analysisChartsPage .analysisChartsMain {
+    width: min(100%, calc(100vw - 12.9rem));
+    max-width: none;
+    margin-inline: auto;
+    height: auto;
+    overflow: visible;
+    padding-bottom: 0.9rem;
+  }
+
+  .analysisChartsPage .analysisChartsInsightsGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .analysisChartsPage .analysisChartsChatDock {
+    position: static;
+    width: 100%;
+  }
+
 }
 
 @media (max-width: 760px) {
+  :root {
+    --side-nav-width: 106px;
+    --side-layout-gap: 0.82rem;
+  }
+
   .sideNav {
-    top: 4.05rem;
-    right: 0.45rem;
-    padding: 0.34rem;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: var(--side-nav-width);
+    max-height: 100vh;
+    gap: 0.34rem;
+    padding: 4.45rem 0.28rem 0.38rem;
   }
 
   .sideNavButton {
-    min-width: 132px;
-    padding: 0.38rem 0.42rem;
-    font-size: 0.76rem;
+    min-width: 0;
+    padding: 0.34rem 0.22rem;
+    font-size: 0.7rem;
+    gap: 0.34rem;
+    flex-direction: column;
+    justify-content: center;
+    text-align: center;
+  }
+
+  .sideNavIcon {
+    width: 1.46rem;
+    height: 1.46rem;
+    border-radius: 9px;
   }
 
   .withSideNav {
-    padding-inline-end: 8.7rem;
+    width: min(100%, calc(100vw - var(--side-nav-width) - var(--side-layout-gap)));
+    margin-inline-start: auto;
+    margin-inline-end: calc(var(--side-layout-gap) / 2);
+    padding-inline-end: 0;
+  }
+
+  .analysisChartsPage .analysisChartsMain {
+    width: 100%;
   }
 
   .topbarInner {
@@ -1478,14 +1728,13 @@ body {
   }
 
   .topActions {
-    grid-row: 2;
-    justify-self: stretch;
-    width: 100%;
-    justify-content: stretch;
+    top: 0.5rem;
+    left: 0.5rem;
   }
 
   .topActions .btnPrimary {
-    width: 100%;
+    width: auto;
+    min-width: 136px;
   }
 
   .kpiGrid {

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone as dt_timezone, timezone
+import csv
+import io
+import json
+import re
+import zipfile
 from django.utils import timezone as django_timezone
 from pathlib import Path
 
@@ -329,12 +334,33 @@ def sync_gmail(request):
         else:
             changed = False
             update_fields = []
+            refresh_fields = {"amount_value", "amount_currency"}
 
             for field, value in defaults.items():
-                if value is not None and not getattr(obj, field, None):
-                    setattr(obj, field, value)
-                    changed = True
-                    update_fields.append(field)
+                if value is None:
+                    continue
+
+                current_value = getattr(obj, field, None)
+
+                if field in refresh_fields:
+                    if current_value == value:
+                        continue
+                elif current_value:
+                    continue
+
+                if field == "amount_value" and current_value is not None:
+                    try:
+                        if abs(float(current_value) - float(value)) < 0.005:
+                            continue
+                    except (TypeError, ValueError):
+                        pass
+
+                if field == "amount_currency" and current_value and str(current_value) == str(value):
+                    continue
+
+                setattr(obj, field, value)
+                changed = True
+                update_fields.append(field)
 
             if changed:
                 obj.save(update_fields=update_fields)
@@ -479,6 +505,182 @@ def serve_file(request, path: str):
         open(target, "rb"),
         content_type=content_type,
     )
+
+
+def _resolve_saved_file_path(saved_path: str | None) -> Path | None:
+    if not saved_path:
+        return None
+
+    base = Path(settings.BILLS_DOWNLOADS_DIR).resolve()
+    raw_value = str(saved_path).strip()
+    if not raw_value:
+        return None
+
+    normalized = raw_value.replace("\\", "/")
+    candidate_paths = []
+
+    raw_path = Path(raw_value)
+    if raw_path.is_absolute():
+        candidate_paths.append(raw_path)
+
+    relative = normalized
+    if relative.startswith("./"):
+        relative = relative[2:]
+    if relative.startswith("downloads/"):
+        relative = relative[len("downloads/"):]
+    candidate_paths.append(base / relative)
+
+    for candidate in candidate_paths:
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (FileNotFoundError, OSError):
+            continue
+
+        try:
+            resolved.relative_to(base)
+        except ValueError:
+            continue
+
+        if resolved.is_file():
+            return resolved
+
+    return None
+
+
+def _safe_archive_filename(value: str | None, fallback: str) -> str:
+    raw = (value or "").strip()
+    if raw:
+        raw = raw.replace("\\", "/").split("/")[-1]
+    else:
+        raw = fallback
+
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1F]+', "_", raw).strip().strip(".")
+    return safe or fallback
+
+
+@api_view(["POST"])
+def export_receipts_report(request):
+    raw_ids = request.data.get("document_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return Response(
+            {"error": "document_ids must be a non-empty list"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    document_ids = []
+    for raw_id in raw_ids:
+        try:
+            document_ids.append(int(raw_id))
+        except (TypeError, ValueError):
+            continue
+
+    if not document_ids:
+        return Response(
+            {"error": "No valid document IDs were provided"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    documents = list(
+        BillDocument.objects.filter(id__in=document_ids).order_by("-msg_date", "-id")
+    )
+    if not documents:
+        return Response(
+            {"error": "No documents found for the selected IDs"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    report_stream = io.StringIO()
+    report_writer = csv.writer(report_stream)
+    report_writer.writerow(
+        [
+            "id",
+            "subject",
+            "sender",
+            "category",
+            "document_type",
+            "amount_value",
+            "amount_currency",
+            "msg_date",
+            "saved_path",
+            "filename",
+        ]
+    )
+
+    archive_buffer = io.BytesIO()
+    used_filenames = {}
+    exported_count = 0
+    missing_files = []
+
+    with zipfile.ZipFile(archive_buffer, "w", compression=zipfile.ZIP_DEFLATED) as report_zip:
+        for document in documents:
+            report_writer.writerow(
+                [
+                    document.id,
+                    document.subject or "",
+                    document.sender or "",
+                    document.category or "",
+                    document.document_type or "",
+                    document.amount_value if document.amount_value is not None else "",
+                    document.amount_currency or "",
+                    document.msg_date.isoformat() if document.msg_date else "",
+                    document.saved_path or "",
+                    document.filename or "",
+                ]
+            )
+
+            resolved_file = _resolve_saved_file_path(document.saved_path)
+            if not resolved_file:
+                missing_files.append(
+                    {
+                        "id": document.id,
+                        "filename": document.filename,
+                        "saved_path": document.saved_path,
+                    }
+                )
+                continue
+
+            fallback_name = f"receipt_{document.id}{resolved_file.suffix or '.pdf'}"
+            base_name = _safe_archive_filename(document.filename or resolved_file.name, fallback_name)
+
+            next_index = used_filenames.get(base_name, 0) + 1
+            used_filenames[base_name] = next_index
+            if next_index > 1:
+                stem = Path(base_name).stem
+                suffix = Path(base_name).suffix
+                archive_name = f"receipts/{stem}_{next_index}{suffix}"
+            else:
+                archive_name = f"receipts/{base_name}"
+
+            report_zip.write(resolved_file, arcname=archive_name)
+            exported_count += 1
+
+        report_zip.writestr("report_summary.csv", report_stream.getvalue().encode("utf-8-sig"))
+        if missing_files:
+            report_zip.writestr(
+                "missing_files.json",
+                json.dumps(missing_files, ensure_ascii=False, indent=2).encode("utf-8"),
+            )
+
+    if exported_count == 0:
+        return Response(
+            {"error": "No receipt files found for the selected documents"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    archive_buffer.seek(0)
+    timestamp = django_timezone.now().strftime("%Y%m%d_%H%M%S")
+    response = FileResponse(
+        archive_buffer,
+        as_attachment=True,
+        filename=f"receipts_report_{timestamp}.zip",
+        content_type="application/zip",
+    )
+    response["X-Report-Documents"] = str(len(documents))
+    response["X-Report-Exported-Files"] = str(exported_count)
+    response["X-Report-Missing-Files"] = str(len(missing_files))
+    return response
+
+
 @api_view(["DELETE"])
 def clean_db(request):
     sql_path = Path(__file__).resolve().parent / "clean_db_script.sql"

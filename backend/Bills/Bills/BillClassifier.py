@@ -155,7 +155,7 @@ class SklearnNaiveBayesClassifier:
             "מספר אישור",
             "תעודת תשלום",
             "קבלה",
-            "שולם",
+            "שולם","סכום","שולם סכום"
         ]
 
         for pattern in RECEIPT_PHRASES:

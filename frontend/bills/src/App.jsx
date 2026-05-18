@@ -42,7 +42,7 @@ const SORT_OPTIONS = [
     { value: "received_desc", label: "מיון: התקבל לאחרונה" },
 ];
 
-const CATEGORY_CHART_COLORS = ["#155b45", "#1f7a5d", "#2e8b57", "#c2872f", "#a56b0f", "#9d7a45", "#7b8b52", "#4f7f5d"];
+const CATEGORY_CHART_COLORS = ["#2563eb", "#ef4444", "#10b981", "#f59e0b", "#8b5cf6", "#06b6d4", "#e11d48", "#84cc16"];
 
 function toNumber(value) {
     if (value === null || value === undefined || value === "") return null;
@@ -99,6 +99,22 @@ function buildRecentMonthKeys(count) {
 
 function stableItemId(item) {
     return String(item.message_id ?? item.id ?? item.filename ?? "");
+}
+
+function filenameFromContentDisposition(headerValue) {
+    if (!headerValue) return "";
+
+    const utf8Match = /filename\*=UTF-8''([^;]+)/i.exec(headerValue);
+    if (utf8Match?.[1]) {
+        try {
+            return decodeURIComponent(utf8Match[1]);
+        } catch {
+            return utf8Match[1];
+        }
+    }
+
+    const fallbackMatch = /filename="?([^"]+)"?/i.exec(headerValue);
+    return fallbackMatch?.[1] || "";
 }
 
 function money(value, currency = "") {
@@ -189,6 +205,12 @@ export default function App() {
     const [quickFilter, setQuickFilter] = useState("all");
     const [sortMode, setSortMode] = useState("due_asc");
     const [timeWindow, setTimeWindow] = useState("30d");
+    const [reportSearch, setReportSearch] = useState("");
+    const [reportCategory, setReportCategory] = useState("all");
+    const [reportStatusFilter, setReportStatusFilter] = useState("all");
+    const [reportQuickFilter, setReportQuickFilter] = useState("all");
+    const [reportSortMode, setReportSortMode] = useState("due_asc");
+    const [reportTimeWindow, setReportTimeWindow] = useState("30d");
     const [analysisCategory, setAnalysisCategory] = useState("all");
     const [analysisMonthFilter, setAnalysisMonthFilter] = useState("");
     const [analysisTimeWindow, setAnalysisTimeWindow] = useState("30d");
@@ -196,14 +218,17 @@ export default function App() {
     const [paidIds, setPaidIds] = useState(() => new Set());
     const [loading, setLoading] = useState(true);
     const [syncing, setSyncing] = useState(false);
+    const [exportingReport, setExportingReport] = useState(false);
     const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
     const [syncTimeWindow, setSyncTimeWindow] = useState("30d");
     const [error, setError] = useState("");
+    const [reportError, setReportError] = useState("");
     const [toastMessage, setToastMessage] = useState("");
     const [chatInput, setChatInput] = useState("");
     const [chatSending, setChatSending] = useState(false);
     const [chatError, setChatError] = useState("");
     const [chatPreviousResponseId, setChatPreviousResponseId] = useState("");
+    const [isPageScrolled, setIsPageScrolled] = useState(false);
     const [chatMessages, setChatMessages] = useState([
         {
             role: "assistant",
@@ -214,9 +239,11 @@ export default function App() {
     const chatMessagesRef = useRef(null);
 
     const deferredSearch = useDeferredValue(search);
+    const deferredReportSearch = useDeferredValue(reportSearch);
     const isHomeScreen = screen === "home";
     const isAnalysisChartsScreen = screen === "analysis_charts";
     const isAnalysisBillsScreen = screen === "analysis_bills";
+    const isReportsScreen = screen === "reports";
 
     useEffect(() => {
         try {
@@ -441,6 +468,62 @@ export default function App() {
         }
     }
 
+    async function exportReceiptsReport() {
+        const selectedIds = reportExportableFilteredItems
+            .map((item) => Number(item.id))
+            .filter((id) => Number.isFinite(id));
+
+        if (!selectedIds.length) {
+            setReportError("לא נמצאו קבצים להפקה לפי החיפוש הנוכחי.");
+            return;
+        }
+
+        try {
+            setExportingReport(true);
+            setReportError("");
+
+            const res = await fetch(`${API_BASE}/reports/export/`, {
+                method: "POST",
+                credentials: "include",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ document_ids: selectedIds }),
+            });
+
+            if (!res.ok) {
+                let message = `Report export failed: ${res.status}`;
+                try {
+                    const payload = await res.json();
+                    if (payload?.error) {
+                        message = payload.error;
+                    }
+                } catch {
+                    const text = await res.text().catch(() => "");
+                    if (text) message = text;
+                }
+                throw new Error(message);
+            }
+
+            const blob = await res.blob();
+            const disposition = res.headers.get("Content-Disposition");
+            const downloadName = filenameFromContentDisposition(disposition) || `receipts_report_${Date.now()}.zip`;
+
+            const objectUrl = window.URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = objectUrl;
+            link.download = downloadName;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.URL.revokeObjectURL(objectUrl);
+
+            setToastMessage(`הדוח הופק בהצלחה (${selectedIds.length} קבצים).`);
+        } catch (e) {
+            setReportError(e?.message || "הפקת הדוח נכשלה.");
+        } finally {
+            setExportingReport(false);
+        }
+    }
+
     function clearFilters() {
         setSearch("");
         setCategory("all");
@@ -450,9 +533,37 @@ export default function App() {
         setTimeWindow("30d");
     }
 
+    function clearReportFilters() {
+        setReportSearch("");
+        setReportCategory("all");
+        setReportStatusFilter("all");
+        setReportQuickFilter("all");
+        setReportSortMode("due_asc");
+        setReportTimeWindow("30d");
+    }
+
     useEffect(() => {
         loadDashboard();
     }, []);
+
+    useEffect(() => {
+        const handleScroll = () => {
+            setIsPageScrolled(window.scrollY > 8);
+        };
+
+        handleScroll();
+        window.addEventListener("scroll", handleScroll, { passive: true });
+
+        return () => {
+            window.removeEventListener("scroll", handleScroll);
+        };
+    }, []);
+
+    useEffect(() => {
+        if (!isReportsScreen) {
+            setReportError("");
+        }
+    }, [isReportsScreen]);
 
     const normalizedItems = useMemo(() => {
         const now = new Date();
@@ -545,6 +656,74 @@ export default function App() {
         sortMode,
         timeWindow,
     ]);
+
+    const reportFilteredItems = useMemo(() => {
+        const query = deferredReportSearch.trim().toLowerCase();
+        const windowDays = timeWindowDays(reportTimeWindow);
+        const nowTs = Date.now();
+        const cutoffTs = windowDays === null ? null : nowTs - windowDays * 24 * 60 * 60 * 1000;
+
+        const filtered = normalizedItems.filter((item) => {
+            if (reportCategory !== "all" && item.category !== reportCategory) return false;
+
+            if (reportStatusFilter === "unpaid" && item.isPaid) return false;
+            if (reportStatusFilter === "paid" && !item.isPaid) return false;
+
+            if (reportQuickFilter === "high_amount" && (item.amount === null || item.amount < 500)) return false;
+            if (reportQuickFilter === "uncategorized" && item.category) return false;
+            if (reportQuickFilter === "missing_amount" && item.amount !== null) return false;
+            if (reportQuickFilter === "has_file" && !item.saved_path) return false;
+
+            if (cutoffTs !== null) {
+                const anchor = item.msgDate || item.dueDate;
+                if (!anchor) return false;
+                const anchorTs = anchor.getTime();
+                if (anchorTs < cutoffTs || anchorTs > nowTs) return false;
+            }
+
+            if (query) {
+                const haystack = `${item.subject || ""} ${item.sender || ""} ${item.filename || ""} ${item.category || ""}`.toLowerCase();
+                if (!haystack.includes(query)) return false;
+            }
+
+            return true;
+        });
+
+        return filtered.sort((a, b) => {
+            if (reportSortMode === "amount_desc" || reportSortMode === "amount_asc") {
+                const aAmount = a.amount ?? (reportSortMode === "amount_desc" ? -Infinity : Infinity);
+                const bAmount = b.amount ?? (reportSortMode === "amount_desc" ? -Infinity : Infinity);
+                return reportSortMode === "amount_desc" ? bAmount - aAmount : aAmount - bAmount;
+            }
+
+            if (reportSortMode === "received_desc") {
+                const aDate = a.msgDate ? a.msgDate.getTime() : 0;
+                const bDate = b.msgDate ? b.msgDate.getTime() : 0;
+                return bDate - aDate;
+            }
+
+            if (a.isPaid !== b.isPaid) return a.isPaid ? 1 : -1;
+            if (a.isOverdue !== b.isOverdue) return a.isOverdue ? -1 : 1;
+            if (a.isDueSoon !== b.isDueSoon) return a.isDueSoon ? -1 : 1;
+
+            const aDue = a.dueDate ? a.dueDate.getTime() : Number.MAX_SAFE_INTEGER;
+            const bDue = b.dueDate ? b.dueDate.getTime() : Number.MAX_SAFE_INTEGER;
+            return reportSortMode === "due_desc" ? bDue - aDue : aDue - bDue;
+        });
+    }, [
+        normalizedItems,
+        deferredReportSearch,
+        reportCategory,
+        reportStatusFilter,
+        reportQuickFilter,
+        reportSortMode,
+        reportTimeWindow,
+    ]);
+
+    const reportExportableFilteredItems = useMemo(
+        () => reportFilteredItems.filter((item) => item.saved_path),
+        [reportFilteredItems],
+    );
 
     const stats = useMemo(() => {
         const visibleAmount = filteredItems.reduce((acc, item) => acc + (item.amount ?? 0), 0);
@@ -653,8 +832,29 @@ export default function App() {
 
     const chartCanvasHeight = useMemo(() => {
         if (!chartPoints.length) return 220;
-        return Math.max(200, Math.min(320, 180 + chartPoints.length * 8));
+        if (chartPoints.length >= 12) return 250;
+        if (chartPoints.length >= 9) return 236;
+        return Math.max(210, Math.min(248, 188 + chartPoints.length * 7));
     }, [chartPoints]);
+
+    const isDenseMonthlyChart = chartPoints.length >= 10;
+
+    const chartAxisStep = useMemo(() => {
+        if (chartPoints.length >= 12) return 2;
+        if (chartPoints.length >= 9) return 2;
+        return 1;
+    }, [chartPoints.length]);
+
+    const visibleAxisPoints = useMemo(() => {
+        if (!chartPoints.length) return [];
+        if (chartAxisStep === 1) return chartPoints;
+
+        return chartPoints.filter((point, index) => {
+            if (analysisMonthFilter === point.key) return true;
+            if (index === 0 || index === chartPoints.length - 1) return true;
+            return index % chartAxisStep === 0;
+        });
+    }, [chartPoints, chartAxisStep, analysisMonthFilter]);
 
     const analysisFilteredItems = useMemo(() => {
         if (!analysisMonthFilter) return monthlySourceItems;
@@ -761,7 +961,11 @@ export default function App() {
     const animatedAnalysisPendingCount = useAnimatedNumber(analysisViewStats.pendingCount);
 
     return (
-        <div className="page" dir="rtl" lang="he">
+        <div
+            className={`page ${isPageScrolled ? "isScrolled" : ""} ${isAnalysisChartsScreen ? "analysisChartsPage" : ""}`}
+            dir="rtl"
+            lang="he"
+        >
             <header className="topbar">
                 <div className="container topbarInner">
                     <div className="projectLogoWrap">
@@ -803,8 +1007,6 @@ export default function App() {
                         )}
                     </div>
                 </div>
-            </header>
-
             <aside className="sideNav" aria-label="ניווט ראשי">
                 <button
                     className={`sideNavButton ${isHomeScreen ? "active" : ""}`}
@@ -852,9 +1054,26 @@ export default function App() {
                     </span>
                     <span className="sideNavLabel">ניתוח הוצאות</span>
                 </button>
-            </aside>
 
-            <main className="container main withSideNav">
+                <button
+                    className={`sideNavButton ${isReportsScreen ? "active" : ""}`}
+                    onClick={() => setScreen("reports")}
+                    aria-current={isReportsScreen ? "page" : undefined}
+                >
+                    <span className="sideNavIcon" aria-hidden="true">
+                        <svg className="sideNavIconSvg" viewBox="0 0 24 24">
+                            <path d="M7 3h10v18H7z" />
+                            <path d="M10 7h4" />
+                            <path d="M10 11h6" />
+                            <path d="M10 15h6" />
+                        </svg>
+                    </span>
+                    <span className="sideNavLabel">הפקת דוחות</span>
+                </button>
+            </aside>
+            </header>
+
+            <main className={`container main withSideNav ${isAnalysisChartsScreen ? "analysisChartsMain" : ""}`}>
                 {loading && <section className="card center">טוען נתונים...</section>}
                 {!loading && error && (
                     <section className="card errorBox">
@@ -969,42 +1188,44 @@ export default function App() {
                             </>
                         )}
 
-                        {(isAnalysisChartsScreen || isAnalysisBillsScreen) && (
+                        {(isAnalysisChartsScreen || isAnalysisBillsScreen || isReportsScreen) && (
                             <>
-                                <section className="kpiGrid fadeIn">
-                                    <article className="kpiCard bills">
-                                        <div className="kpiLabel">
-                                            <span className="kpiLabelIcon" aria-hidden="true">📄</span>
-                                            <span>סה״כ חשבוניות</span>
-                                        </div>
-                                        <div className="kpiValue">{animatedAnalysisBillsCount}</div>
-                                    </article>
-                                    <article className="kpiCard amount">
-                                        <div className="kpiLabel">
-                                            <span className="kpiLabelIcon" aria-hidden="true">₪</span>
-                                            <span>סכום כולל</span>
-                                        </div>
-                                        <div className="kpiValue">{money(animatedAnalysisVisibleAmount, "₪")}</div>
-                                    </article>
-                                    <article className="kpiCard paid">
-                                        <div className="kpiLabel">
-                                            <span className="kpiLabelIcon" aria-hidden="true">✅</span>
-                                            <span>חשבוניות ששולמו</span>
-                                        </div>
-                                        <div className="kpiValue">{animatedAnalysisPaidCount}</div>
-                                    </article>
-                                    <article className="kpiCard pending">
-                                        <div className="kpiLabel">
-                                            <span className="kpiLabelIcon" aria-hidden="true">🧾</span>
-                                            <span>ממתין לתשלום</span>
-                                        </div>
-                                        <div className="kpiValue">{animatedAnalysisPendingCount}</div>
-                                    </article>
-                                </section>
+                                {(isAnalysisChartsScreen || isAnalysisBillsScreen) && (
+                                    <section className={`kpiGrid fadeIn ${isAnalysisChartsScreen ? "analysisChartsKpiGrid" : ""}`}>
+                                        <article className="kpiCard bills">
+                                            <div className="kpiLabel">
+                                                <span className="kpiLabelIcon" aria-hidden="true">📄</span>
+                                                <span>סה״כ חשבוניות</span>
+                                            </div>
+                                            <div className="kpiValue">{animatedAnalysisBillsCount}</div>
+                                        </article>
+                                        <article className="kpiCard amount">
+                                            <div className="kpiLabel">
+                                                <span className="kpiLabelIcon" aria-hidden="true">₪</span>
+                                                <span>סכום כולל</span>
+                                            </div>
+                                            <div className="kpiValue">{money(animatedAnalysisVisibleAmount, "₪")}</div>
+                                        </article>
+                                        <article className="kpiCard paid">
+                                            <div className="kpiLabel">
+                                                <span className="kpiLabelIcon" aria-hidden="true">✅</span>
+                                                <span>חשבוניות ששולמו</span>
+                                            </div>
+                                            <div className="kpiValue">{animatedAnalysisPaidCount}</div>
+                                        </article>
+                                        <article className="kpiCard pending">
+                                            <div className="kpiLabel">
+                                                <span className="kpiLabelIcon" aria-hidden="true">🧾</span>
+                                                <span>ממתין לתשלום</span>
+                                            </div>
+                                            <div className="kpiValue">{animatedAnalysisPendingCount}</div>
+                                        </article>
+                                    </section>
+                                )}
 
                                 {isAnalysisChartsScreen && (
                                     <>
-                                        <section className="card chartTimeWindowCard">
+                                        <section className="card chartTimeWindowCard analysisChartsFiltersCard">
                                             <div className="filtersGrid chartFiltersGrid">
                                                 <select
                                                     className="select"
@@ -1029,8 +1250,8 @@ export default function App() {
                                             </div>
                                         </section>
 
-                                        <section className="insightsGrid">
-                                            <article className="card chartCard">
+                                        <section className="insightsGrid analysisChartsInsightsGrid">
+                                            <article className="card chartCard analysisChartsPanelCard">
                                                 <div className="sectionHeader">
                                                     <h2>מגמת הוצאות</h2>
                                                     <button
@@ -1047,7 +1268,9 @@ export default function App() {
                                                 {monthlySeries.length > 0 && (
                                                     <div className="lineChart">
                                                         <div className="lineChartViewport">
-                                                            <div className="lineChartTrack">
+                                                            <div
+                                                                className={`lineChartTrack ${isDenseMonthlyChart ? "dense" : ""}`}
+                                                            >
                                                                 <div className="lineChartCanvas" style={{ height: `${chartCanvasHeight}px` }}>
                                                                     <svg className="lineChartSvg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
                                                                         {[12, 31, 50, 69, 88].map((y) => (
@@ -1078,7 +1301,7 @@ export default function App() {
                                                                 </div>
 
                                                                 <div className="lineChartAxis">
-                                                                    {chartPoints.map((point) => {
+                                                                    {visibleAxisPoints.map((point) => {
                                                                         const active = analysisMonthFilter === point.key;
 
                                                                         return (
@@ -1093,7 +1316,9 @@ export default function App() {
                                                                                 aria-label={`${point.label}: ${money(point.total)}`}
                                                                             >
                                                                                 <span className="lineChartAxisMonth">{point.label}</span>
-                                                                                <span className="lineChartAxisAmount">{money(point.total, "₪")}</span>
+                                                                                {(!isDenseMonthlyChart || active) && (
+                                                                                    <span className="lineChartAxisAmount">{money(point.total, "₪")}</span>
+                                                                                )}
                                                                             </button>
                                                                         );
                                                                     })}
@@ -1104,7 +1329,7 @@ export default function App() {
                                                 )}
                                             </article>
 
-                                            <article className="card categoryCard">
+                                            <article className="card categoryCard analysisChartsPanelCard">
                                                 <div className="sectionHeader">
                                                     <h2>פילוח הוצאות לפי קטגוריה</h2>
                                                     <span className="hint">{categoryChart.slices.length} קטגוריות מוצגות</span>
@@ -1163,7 +1388,7 @@ export default function App() {
                                             </article>
                                         </section>
 
-                                        <section className="card chatAssistantCard fadeIn">
+                                        <section className="card chatAssistantCard fadeIn analysisChartsChatDock">
                                             <div className="sectionHeader">
                                                 <h2>צ׳אט תובנות</h2>
                                                 <span className="hint">שאל שאלות על הנתונים שלך</span>
@@ -1357,6 +1582,153 @@ export default function App() {
                                                                             <button className="btnGhost small" onClick={() => createReminder(item)}>
                                                                                 תזכורת
                                                                             </button>
+                                                                        </div>
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        })}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            )}
+                                        </section>
+                                    </>
+                                )}
+
+                                {isReportsScreen && (
+                                    <>
+                                        <section className="card filtersCard fadeIn">
+                                            <div className="filtersGrid">
+                                                <label className="searchField prominentSearch">
+                                                    <span className="searchIcon" aria-hidden="true">🔎</span>
+                                                    <input
+                                                        className="input searchInput"
+                                                        value={reportSearch}
+                                                        onChange={(event) => setReportSearch(event.target.value)}
+                                                        placeholder="חיפוש לפי נושא, שולח, שם קובץ או קטגוריה"
+                                                    />
+                                                </label>
+
+                                                <select className="select" value={reportCategory} onChange={(event) => setReportCategory(event.target.value)}>
+                                                    <option value="all">כל הקטגוריות</option>
+                                                    {categories.map((option) => (
+                                                        <option key={`report-category-${option}`} value={option}>
+                                                            {option}
+                                                        </option>
+                                                    ))}
+                                                </select>
+
+                                                <select
+                                                    className="select"
+                                                    value={reportStatusFilter}
+                                                    onChange={(event) => setReportStatusFilter(event.target.value)}
+                                                >
+                                                    {STATUS_OPTIONS.map((option) => (
+                                                        <option key={`report-status-${option.value}`} value={option.value}>
+                                                            {option.label}
+                                                        </option>
+                                                    ))}
+                                                </select>
+
+                                                <select
+                                                    className="select"
+                                                    value={reportTimeWindow}
+                                                    onChange={(event) => setReportTimeWindow(event.target.value)}
+                                                >
+                                                    {TIME_WINDOW_OPTIONS.map((option) => (
+                                                        <option key={`report-time-${option.value}`} value={option.value}>
+                                                            תקופת זמן: {option.label}
+                                                        </option>
+                                                    ))}
+                                                </select>
+
+                                                <select className="select" value={reportSortMode} onChange={(event) => setReportSortMode(event.target.value)}>
+                                                    {SORT_OPTIONS.map((option) => (
+                                                        <option key={`report-sort-${option.value}`} value={option.value}>
+                                                            {option.label}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            </div>
+
+                                            <div className="chipRow">
+                                                {QUICK_FILTERS.map((filter) => (
+                                                    <button
+                                                        key={`report-chip-${filter.value}`}
+                                                        className={`chipButton ${reportQuickFilter === filter.value ? "active" : ""}`}
+                                                        onClick={() => setReportQuickFilter(filter.value)}
+                                                    >
+                                                        {filter.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+
+                                            <div className="filtersActions">
+                                                <button className="btnGhost" onClick={clearReportFilters}>
+                                                    נקה פילטרים
+                                                </button>
+                                                <button
+                                                    className="btnPrimary"
+                                                    onClick={exportReceiptsReport}
+                                                    disabled={exportingReport || reportExportableFilteredItems.length === 0}
+                                                >
+                                                    {exportingReport ? "מכין דוח..." : "הפק דוח קבלות"}
+                                                </button>
+                                            </div>
+                                            {reportError && <div className="reportErrorBox">{reportError}</div>}
+                                        </section>
+
+                                        <section className="card tableCard fadeIn">
+                                            <div className="sectionHeader">
+                                                <h2>קבצים בדוח: {reportExportableFilteredItems.length}</h2>
+                                            </div>
+
+                                            {reportExportableFilteredItems.length === 0 && (
+                                                <div className="emptyState">אין קבלות זמינות להפקה לפי הסינון הנוכחי.</div>
+                                            )}
+
+                                            {reportExportableFilteredItems.length > 0 && (
+                                                <div className="tableWrap">
+                                                    <table className="billsTable">
+                                                        <thead>
+                                                        <tr>
+                                                            <th>חשבונית</th>
+                                                            <th>סוג מסמך</th>
+                                                            <th>קטגוריה</th>
+                                                            <th>סכום</th>
+                                                            <th>התקבל</th>
+                                                            <th>קובץ</th>
+                                                        </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                        {reportExportableFilteredItems.map((item, index) => {
+                                                            const fileUrl = fileUrlFromSavedPath(item.saved_path);
+                                                            const subject = item.subject || item.filename || "ללא נושא";
+                                                            return (
+                                                                <tr
+                                                                    key={`report-${item.stableId}-${item.id || index}`}
+                                                                    className="tableRow"
+                                                                    style={{ animationDelay: `${Math.min(index * 20, 180)}ms` }}
+                                                                >
+                                                                    <td>
+                                                                        <div className="tableMainCell">
+                                                                            <strong className="tableSubject">{subject}</strong>
+                                                                            <span className="tableSender">{senderDisplay(item.sender)}</span>
+                                                                        </div>
+                                                                    </td>
+                                                                    <td>
+                                                                        <span className="statusBadge unpaid">{item.document_type === "receipt" ? "קבלה" : "חשבונית"}</span>
+                                                                    </td>
+                                                                    <td>
+                                                                        <span className="categoryBadge tableBadge">{item.category || "ללא קטגוריה"}</span>
+                                                                    </td>
+                                                                    <td className="tableAmount">{money(item.amount, item.amount_currency || "₪")}</td>
+                                                                    <td className="tableDate">{formatDate(item.msgDate)}</td>
+                                                                    <td>
+                                                                        <div className="tableActions">
+                                                                            <a className="btnSecondary small" href={fileUrl} target="_blank" rel="noreferrer">
+                                                                                צפייה
+                                                                            </a>
                                                                         </div>
                                                                     </td>
                                                                 </tr>
