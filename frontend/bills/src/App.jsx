@@ -969,7 +969,7 @@ export default function App() {
             <header className="topbar">
                 <div className="container topbarInner">
                     <div className="projectLogoWrap">
-                        <img className="projectLogo" src="/logo-concept-b-header.png" alt="Bills logo" />
+                        <img className="projectLogo" src="/logo-concept-b.png" alt="Bills logo" />
                     </div>
 
                     <div className="topActions" ref={syncPopoverRef}>
