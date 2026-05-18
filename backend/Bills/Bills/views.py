@@ -1,11 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone as dt_timezone, timezone
-import csv
-import io
-import json
-import re
-import zipfile
 from django.utils import timezone as django_timezone
 from pathlib import Path
 
@@ -334,33 +329,12 @@ def sync_gmail(request):
         else:
             changed = False
             update_fields = []
-            refresh_fields = {"amount_value", "amount_currency"}
 
             for field, value in defaults.items():
-                if value is None:
-                    continue
-
-                current_value = getattr(obj, field, None)
-
-                if field in refresh_fields:
-                    if current_value == value:
-                        continue
-                elif current_value:
-                    continue
-
-                if field == "amount_value" and current_value is not None:
-                    try:
-                        if abs(float(current_value) - float(value)) < 0.005:
-                            continue
-                    except (TypeError, ValueError):
-                        pass
-
-                if field == "amount_currency" and current_value and str(current_value) == str(value):
-                    continue
-
-                setattr(obj, field, value)
-                changed = True
-                update_fields.append(field)
+                if value is not None and not getattr(obj, field, None):
+                    setattr(obj, field, value)
+                    changed = True
+                    update_fields.append(field)
 
             if changed:
                 obj.save(update_fields=update_fields)
@@ -505,8 +479,51 @@ def serve_file(request, path: str):
         open(target, "rb"),
         content_type=content_type,
     )
+@api_view(["DELETE"])
+def clean_db(request):
+    sql_path = Path(__file__).resolve().parent / "clean_db_script.sql"
 
+    if not sql_path.exists():
+        return Response(
+            {"error": f"SQL script not found at {sql_path}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
+    if connection.vendor != "sqlite":
+        return Response(
+            {"error": f"clean_db is intended for SQLite, but current DB vendor is '{connection.vendor}'"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        sql = sql_path.read_text(encoding="utf-8")
+
+        with transaction.atomic():
+            with connection.cursor() as cursor:
+                cursor.executescript(sql)
+
+            # reset gmail sync tracking
+            GmailAccount.objects.all().update(
+                synced_from=None,
+                synced_until=None,
+                last_synced_at=None,
+                last_sync_window=None,
+                last_sync_count=0,
+            )
+
+        return Response(
+            {
+                "message": "SQLite database cleaned successfully",
+                "gmail_accounts_reset": True,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    except Exception as e:
+        return Response(
+            {"error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 def _resolve_saved_file_path(saved_path: str | None) -> Path | None:
     if not saved_path:
         return None
@@ -679,50 +696,3 @@ def export_receipts_report(request):
     response["X-Report-Exported-Files"] = str(exported_count)
     response["X-Report-Missing-Files"] = str(len(missing_files))
     return response
-
-
-@api_view(["DELETE"])
-def clean_db(request):
-    sql_path = Path(__file__).resolve().parent / "clean_db_script.sql"
-
-    if not sql_path.exists():
-        return Response(
-            {"error": f"SQL script not found at {sql_path}"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
-
-    if connection.vendor != "sqlite":
-        return Response(
-            {"error": f"clean_db is intended for SQLite, but current DB vendor is '{connection.vendor}'"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    try:
-        sql = sql_path.read_text(encoding="utf-8")
-
-        with transaction.atomic():
-            with connection.cursor() as cursor:
-                cursor.executescript(sql)
-
-            # reset gmail sync tracking
-            GmailAccount.objects.all().update(
-                synced_from=None,
-                synced_until=None,
-                last_synced_at=None,
-                last_sync_window=None,
-                last_sync_count=0,
-            )
-
-        return Response(
-            {
-                "message": "SQLite database cleaned successfully",
-                "gmail_accounts_reset": True,
-            },
-            status=status.HTTP_200_OK,
-        )
-
-    except Exception as e:
-        return Response(
-            {"error": str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
