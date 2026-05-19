@@ -7,7 +7,6 @@ from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import Pipeline
 
-
 def pdf_words_to_list(pdf_path: Path):
     words = []
 
@@ -135,38 +134,42 @@ class SklearnNaiveBayesClassifier:
         self.model.fit(texts, labels)
         self.is_trained = True
 
-    def classify_text(self, text: str):
+    def classify_text(self, text: str,subject=None):
         words = clean_words(text.split())
-        return self._classify_words(words)
+        return self._classify_words(words, subject)
 
-    def classify_file(self, file_path: Path):
+    def classify_file(self, file_path: Path,subject=None):
         words = extract_words_from_file(Path(file_path))
-        return self._classify_words(words)
+        return self._classify_words(words, subject)
 
-    def decide_bill_or_receipt_from_words(self, words):
-        RECEIPT_PHRASES = [
-            "אישור קבלת תשלום",
+    def decide_bill_or_receipt_from_subject(self, subject: str) -> str:
+        RECEIPT_KEYWORDS = [
+            "קבלה",
+            "receipt",
+            "payment confirmation",
             "אישור תשלום",
-            "לא לתשלום",
+            "אישור קבלת תשלום",
+            "שולם",
             "שולם בתאריך",
             "אישור עסקה",
-            "יתרה לתשלום 0",
-            "חוב 0",
             "מספר אישור",
             "תעודת תשלום",
-            "קבלה",
-            "שולם","סכום","שולם סכום"
+            "paid",
+            "זיכוי"
+            ,
+            "payment received",
+            "transaction approved",
         ]
+        if not subject:
+            return "bill"
 
-        for pattern in RECEIPT_PHRASES:
-            size = len(pattern)
-
-            for i in range(len(words) - size + 1):
-                if words[i:i + size] == pattern:
-                    return "receipt"
+        normalized_subject = str(subject[::-1]).strip().lower()
+        for keyword in RECEIPT_KEYWORDS:
+            if keyword[::-1].lower() in normalized_subject:
+                return "receipt"
 
         return "bill"
-    def _classify_words(self, words):
+    def _classify_words(self, words,subject=None):
         if not self.is_trained:
             raise ValueError("Classifier is not trained.")
 
@@ -184,7 +187,7 @@ class SklearnNaiveBayesClassifier:
 
         # financial/general classifier stage
         if prediction == "financial":
-            prediction = self.decide_bill_or_receipt_from_words(words)
+            prediction = self.decide_bill_or_receipt_from_subject(subject)
 
         return prediction, probs
 

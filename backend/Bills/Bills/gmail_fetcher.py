@@ -237,7 +237,7 @@ def fetch_invoice_attachments(
                 out_path = _make_unique_path(downloads_dir / safe)
                 out_path.write_bytes(file_bytes)
 
-                prediction, _ = bill_classifier.classify_file(out_path)
+                prediction, _ = bill_classifier.classify_file(out_path,subject=subject)
                 if prediction not in ["bill","receipt"]:
                     continue
                 document_type = prediction.lower().strip()
@@ -413,7 +413,6 @@ def fetch_invoice_attachments(
 
         payload = full.get("payload", {})
         email_body_text = _extract_email_body_text(service, msg_id, payload)
-
         body_analysis = analyze_text(
             email_body_text,
             source_label=f"email body {msg_id}",
@@ -452,7 +451,7 @@ def fetch_invoice_attachments(
                 out_path = _make_unique_path(downloads_dir / safe)
                 out_path.write_bytes(file_bytes)
 
-                prediction, _ = bill_classifier.classify_file(out_path)
+                prediction, _ = bill_classifier.classify_file(out_path,subject=subject)
                 if prediction not in ["bill","receipt"]:
                     continue
                 document_type = prediction.lower().strip()
@@ -503,7 +502,7 @@ def fetch_invoice_attachments(
                 continue
 
         # Case 2: no PDFs -> fallback to body text
-        prediction, _ = bill_classifier.classify_text(email_body_text or "")
+        prediction, _ = bill_classifier.classify_text(email_body_text or "",subject=subject)
         if prediction not in ["bill","receipt"]:
             continue
         document_type = prediction.lower().strip()

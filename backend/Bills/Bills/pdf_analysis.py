@@ -449,7 +449,7 @@ def _money_candidates(text: str):
             continue
 
         value = _parse_amount_number(raw)
-        if value is None or value <= 0:
+        if value is None:
             continue
 
         if value > 200_000:
