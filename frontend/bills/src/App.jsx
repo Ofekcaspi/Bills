@@ -584,7 +584,7 @@ export default function App() {
                 daysToDue,
                 isOverdue: daysToDue !== null && daysToDue < 0,
                 isDueSoon: daysToDue !== null && daysToDue >= 0 && daysToDue <= DUE_SOON_DAYS,
-                isPaid: paidIds.has(id),
+                isPaid: item.document_type === "receipt",
             };
         });
     }, [items, paidIds]);
