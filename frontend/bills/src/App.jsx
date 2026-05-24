@@ -5,6 +5,8 @@ const API_BASE = "http://127.0.0.1:8000";
 const DUE_SOON_DAYS = 14;
 const PAID_STORAGE_KEY = "bills_paid_ids_v1";
 const SUMMARY_DEFAULT = { total: 0, gmail_connected: false, connected_email: "", connected_user: "" };
+const DEFAULT_TIME_WINDOW = "365d";
+const DEFAULT_SORT_MODE = "received_desc";
 
 const TIME_WINDOW_OPTIONS = [
     { value: "7d", label: "7 ימים" },
@@ -203,24 +205,24 @@ export default function App() {
     const [category, setCategory] = useState("all");
     const [statusFilter, setStatusFilter] = useState("all");
     const [quickFilter, setQuickFilter] = useState("all");
-    const [sortMode, setSortMode] = useState("due_asc");
-    const [timeWindow, setTimeWindow] = useState("30d");
+    const [sortMode, setSortMode] = useState(DEFAULT_SORT_MODE);
+    const [timeWindow, setTimeWindow] = useState(DEFAULT_TIME_WINDOW);
     const [reportSearch, setReportSearch] = useState("");
     const [reportCategory, setReportCategory] = useState("all");
     const [reportStatusFilter, setReportStatusFilter] = useState("all");
     const [reportQuickFilter, setReportQuickFilter] = useState("all");
-    const [reportSortMode, setReportSortMode] = useState("due_asc");
-    const [reportTimeWindow, setReportTimeWindow] = useState("30d");
+    const [reportSortMode, setReportSortMode] = useState(DEFAULT_SORT_MODE);
+    const [reportTimeWindow, setReportTimeWindow] = useState(DEFAULT_TIME_WINDOW);
     const [analysisCategory, setAnalysisCategory] = useState("all");
     const [analysisMonthFilter, setAnalysisMonthFilter] = useState("");
-    const [analysisTimeWindow, setAnalysisTimeWindow] = useState("30d");
+    const [analysisTimeWindow, setAnalysisTimeWindow] = useState(DEFAULT_TIME_WINDOW);
 
     const [paidIds, setPaidIds] = useState(() => new Set());
     const [loading, setLoading] = useState(true);
     const [syncing, setSyncing] = useState(false);
     const [exportingReport, setExportingReport] = useState(false);
     const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
-    const [syncTimeWindow, setSyncTimeWindow] = useState("30d");
+    const [syncTimeWindow, setSyncTimeWindow] = useState(DEFAULT_TIME_WINDOW);
     const [error, setError] = useState("");
     const [reportError, setReportError] = useState("");
     const [toastMessage, setToastMessage] = useState("");
@@ -400,7 +402,7 @@ export default function App() {
     }
 
     function openSyncModal() {
-        setSyncTimeWindow(timeWindow || "30d");
+        setSyncTimeWindow(timeWindow || DEFAULT_TIME_WINDOW);
         setIsSyncModalOpen(true);
     }
 
@@ -441,7 +443,7 @@ export default function App() {
     }
 
     async function confirmSyncNow() {
-        const selectedWindow = syncTimeWindow || "30d";
+        const selectedWindow = syncTimeWindow || DEFAULT_TIME_WINDOW;
         setIsSyncModalOpen(false);
         await syncNow(selectedWindow);
     }
@@ -529,8 +531,8 @@ export default function App() {
         setCategory("all");
         setStatusFilter("all");
         setQuickFilter("all");
-        setSortMode("due_asc");
-        setTimeWindow("30d");
+        setSortMode(DEFAULT_SORT_MODE);
+        setTimeWindow(DEFAULT_TIME_WINDOW);
     }
 
     function clearReportFilters() {
@@ -538,8 +540,8 @@ export default function App() {
         setReportCategory("all");
         setReportStatusFilter("all");
         setReportQuickFilter("all");
-        setReportSortMode("due_asc");
-        setReportTimeWindow("30d");
+        setReportSortMode(DEFAULT_SORT_MODE);
+        setReportTimeWindow(DEFAULT_TIME_WINDOW);
     }
 
     useEffect(() => {

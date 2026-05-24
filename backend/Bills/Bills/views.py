@@ -106,7 +106,7 @@ def window_to_dates(time_window: str | None):
         "365d": 365,
     }
 
-    days = days_map.get(time_window or "30d", 30)
+    days = days_map.get(time_window or "365d", 365)
     now = django_timezone.now()
     return now - timedelta(days=days), now
 @api_view(["PATCH"])
@@ -193,37 +193,46 @@ def sync_gmail(request):
     auth = _auth_service()
 
     gmail_account_id = request.session.get("gmail_account_id")
-    gmail_account = None
+    active_accounts = list(
+        GmailAccount.objects.filter(is_active=True).order_by("-updated_at")
+    )
 
+    if not active_accounts:
+        return Response(
+            {"ok": False, "error": "not_connected"},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    selected_account = None
+
+    # Keep the session-preferred account first (if still active), then fallback to others.
+    candidates = []
     if gmail_account_id:
-        gmail_account = GmailAccount.objects.filter(
-            id=gmail_account_id,
-            is_active=True,
-        ).first()
+        preferred = next((acc for acc in active_accounts if acc.id == gmail_account_id), None)
+        if preferred is not None:
+            candidates.append(preferred)
 
-    if not gmail_account:
-        gmail_account = GmailAccount.objects.filter(
-            is_active=True,
-        ).order_by("-updated_at").first()
+    for acc in active_accounts:
+        if not any(existing.id == acc.id for existing in candidates):
+            candidates.append(acc)
 
-    if not gmail_account:
+    for candidate in candidates:
+        creds = auth.ensure_valid_creds(candidate)
+        if creds:
+            selected_account = candidate
+            break
+
+    if not selected_account:
         return Response(
             {"ok": False, "error": "not_connected"},
             status=status.HTTP_401_UNAUTHORIZED,
         )
 
-    request.session["gmail_account_id"] = gmail_account.id
+    request.session["gmail_account_id"] = selected_account.id
     request.session.modified = True
+    gmail_account = selected_account
 
-    creds = auth.ensure_valid_creds(gmail_account)
-
-    if not creds:
-        return Response(
-            {"ok": False, "error": "not_connected"},
-            status=status.HTTP_401_UNAUTHORIZED,
-        )
-
-    time_window = request.data.get("time_window") or "30d"
+    time_window = request.data.get("time_window") or "365d"
 
     query = request.data.get("query") or (
         '(invoice OR receipt OR "חשבונית" OR "קבלה" OR "Order" OR "הזמנה" OR "חשבונית מס" OR "Tax Invoice")'
