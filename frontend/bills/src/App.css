@@ -21,6 +21,7 @@
   --amber: #d97706;
   --amber-soft: #f6ead5;
   --emerald-soft: #e8f2ee;
+  --topbar-bg: #f8fbff;
   --radius-xl: 22px;
   --radius-lg: 16px;
   --side-nav-width: 188px;
@@ -85,7 +86,7 @@ body {
   z-index: 30;
   border-bottom: 1px solid rgba(148, 163, 184, 0.28);
   backdrop-filter: blur(18px);
-  background: rgba(248, 251, 255, 0.92);
+  background: var(--topbar-bg);
   padding-block: 0;
 }
 
@@ -126,6 +127,7 @@ body {
   flex-direction: column;
   justify-content: center;
   align-items: center;
+  background: transparent;
   padding: 0;
 }
 
@@ -133,12 +135,11 @@ body {
   display: block;
   width: min(100%, 540px);
   max-width: 100%;
-  max-height: 120px;
+  max-height: 175px;
   height: auto;
-  transform: scale(0.93);
-  transform-origin: center;
-  filter: drop-shadow(0 6px 12px rgba(37, 99, 235, 0.2));
-  margin: -0.3rem 0 -0.24rem;
+  transform: none;
+  filter: none;
+  margin: 0;
 }
 
 .sideNav {
