@@ -182,3 +182,38 @@ class Receipt(BillDocument):
         })
 
         return data
+
+
+class ChatConversation(models.Model):
+    session_key = models.CharField(max_length=64, unique=True)
+    previous_response_id = models.CharField(max_length=128, blank=True, null=True)
+    model_name = models.CharField(max_length=64, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"session={self.session_key}"
+
+
+class ChatMessage(models.Model):
+    class Role(models.TextChoices):
+        USER = "user", "User"
+        ASSISTANT = "assistant", "Assistant"
+        SYSTEM = "system", "System"
+
+    conversation = models.ForeignKey(
+        ChatConversation,
+        on_delete=models.CASCADE,
+        related_name="messages",
+    )
+    role = models.CharField(max_length=16, choices=Role.choices)
+    text = models.TextField()
+    openai_response_id = models.CharField(max_length=128, blank=True, null=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["id"]
+
+    def __str__(self):
+        return f"{self.role} #{self.id} (conv={self.conversation_id})"
