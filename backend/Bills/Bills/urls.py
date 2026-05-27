@@ -4,6 +4,7 @@ from django.urls import path
 from .views import (
     gmail_connect,
     sync_gmail,
+    chat_with_openai,
     bills_list,
     bills_summary,
     bills_upcoming,
@@ -20,6 +21,7 @@ urlpatterns = [
 
     # API
     path("sync/", sync_gmail),
+    path("chat/", chat_with_openai),
     path("bills/", bills_list),
     path("summary/", bills_summary),
     path("upcoming/", bills_upcoming),

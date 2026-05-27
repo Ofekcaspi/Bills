@@ -45,6 +45,11 @@ const SORT_OPTIONS = [
 ];
 
 const CATEGORY_CHART_COLORS = ["#2563eb", "#ef4444", "#10b981", "#f59e0b", "#8b5cf6", "#06b6d4", "#e11d48", "#84cc16"];
+const ANOMALY_MIN_INCREASE_RATIO = 0.5;
+const ANOMALY_MIN_PREVIOUS_AMOUNT = 80;
+const ANOMALY_MIN_DELTA_AMOUNT = 50;
+const ELECTRICITY_CATEGORY = "\u05d7\u05e9\u05de\u05dc";
+const CONTROL_MARKS_REGEX = /[\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g;
 
 function toNumber(value) {
     if (value === null || value === undefined || value === "") return null;
@@ -156,6 +161,14 @@ function senderInitials(value) {
         .slice(0, 2);
     if (!tokens.length) return "?";
     return tokens.map((token) => token[0]).join("").toUpperCase();
+}
+
+function normalizeCategoryLabel(value) {
+    return String(value || "").replace(CONTROL_MARKS_REGEX, "").trim();
+}
+
+function isElectricityCategory(value) {
+    return normalizeCategoryLabel(value) === ELECTRICITY_CATEGORY;
 }
 
 function useAnimatedNumber(target, { duration = 700, decimals = 0 } = {}) {
@@ -570,7 +583,7 @@ export default function App() {
     const normalizedItems = useMemo(() => {
         const now = new Date();
 
-        return items.map((item) => {
+        const mappedItems = items.map((item) => {
             const amount = toNumber(item.amount_value);
             const dueDate = parseDate(item.due_date_iso);
             const msgDate = parseDate(item.msg_date);
@@ -588,6 +601,21 @@ export default function App() {
                 isDueSoon: daysToDue !== null && daysToDue >= 0 && daysToDue <= DUE_SOON_DAYS,
                 isPaid: item.document_type === "receipt",
             };
+        });
+
+        const seenElectricityBills = new Set();
+        return mappedItems.filter((item) => {
+            if (!isElectricityCategory(item.category)) return true;
+            if (item.document_type !== "bill") return true;
+            if (item.amount === null) return true;
+
+            const duplicateKey = `${item.amount.toFixed(2)}|${item.amount_currency || ""}`;
+            if (seenElectricityBills.has(duplicateKey)) {
+                return false;
+            }
+
+            seenElectricityBills.add(duplicateKey);
+            return true;
         });
     }, [items, paidIds]);
 
@@ -951,6 +979,62 @@ export default function App() {
         }));
     }, [categoryChart]);
 
+    const anomalyInsight = useMemo(() => {
+        const groupedByCategory = new Map();
+
+        monthlySourceItems.forEach((item) => {
+            if (!item.category) return;
+            if (item.amount === null || item.amount <= 0) return;
+
+            const anchor = item.msgDate || item.dueDate;
+            if (!anchor) return;
+
+            const categoryItems = groupedByCategory.get(item.category) || [];
+            categoryItems.push({ amount: item.amount, anchor });
+            groupedByCategory.set(item.category, categoryItems);
+        });
+
+        let bestCandidate = null;
+
+        groupedByCategory.forEach((entries, categoryName) => {
+            if (entries.length < 2) return;
+
+            const sorted = [...entries].sort((a, b) => b.anchor.getTime() - a.anchor.getTime());
+            const latest = sorted[0];
+            const previous = sorted[1];
+
+            if (!latest || !previous) return;
+
+            const delta = latest.amount - previous.amount;
+            if (delta <= 0) return;
+            if (previous.amount < ANOMALY_MIN_PREVIOUS_AMOUNT) return;
+            if (delta < ANOMALY_MIN_DELTA_AMOUNT) return;
+
+            const ratio = delta / previous.amount;
+            if (ratio < ANOMALY_MIN_INCREASE_RATIO) return;
+
+            const candidate = {
+                category: categoryName,
+                latestAmount: latest.amount,
+                previousAmount: previous.amount,
+                latestDate: latest.anchor,
+                previousDate: previous.anchor,
+                delta,
+                ratio,
+            };
+
+            if (
+                !bestCandidate ||
+                candidate.ratio > bestCandidate.ratio ||
+                (candidate.ratio === bestCandidate.ratio && candidate.delta > bestCandidate.delta)
+            ) {
+                bestCandidate = candidate;
+            }
+        });
+
+        return bestCandidate;
+    }, [monthlySourceItems]);
+
     const analysisViewItems = isAnalysisBillsScreen ? filteredItems : analysisFilteredItems;
     const analysisViewStats = isAnalysisBillsScreen ? stats : analysisStats;
     const animatedHomeBillsCount = useAnimatedNumber(normalizedItems.length);
@@ -971,7 +1055,7 @@ export default function App() {
             <header className="topbar">
                 <div className="container topbarInner">
                     <div className="projectLogoWrap">
-                        <img className="projectLogo" src="/logo-concept-b.png" alt="Bills logo" />
+                        <img className="projectLogo" src="/BILLSLOGO.jpg" alt="Bills logo" />
                     </div>
 
                     <div className="topActions" ref={syncPopoverRef}>
@@ -1251,6 +1335,29 @@ export default function App() {
                                                 </select>
                                             </div>
                                         </section>
+
+                                        {anomalyInsight && (
+                                            <section className="card anomalyInsightCard" role="status" aria-live="polite">
+                                                <div className="anomalyInsightRow">
+                                                    <div className="anomalyInsightIcon" aria-hidden="true">
+                                                        <svg className="anomalyInsightIconSvg" viewBox="0 0 24 24" focusable="false">
+                                                            <circle cx="12" cy="12" r="9" />
+                                                            <path d="M12 7.5v6" />
+                                                            <path d="M12 16.8h.01" />
+                                                        </svg>
+                                                    </div>
+                                                    <div className="anomalyInsightContent">
+                                                        <p className="anomalyInsightText">
+                                                            חשבון {anomalyInsight.category} האחרון עומד על {money(anomalyInsight.latestAmount, "₪")} והוא גבוה
+                                                            ב-{Math.round(anomalyInsight.ratio * 100)}% לעומת החשבון הקודם ({money(anomalyInsight.previousAmount, "₪")}).
+                                                        </p>
+                                                        <p className="anomalyInsightMeta">
+                                                            פער: +{money(anomalyInsight.delta, "₪")} בין {formatDate(anomalyInsight.previousDate)} ל-{formatDate(anomalyInsight.latestDate)}.
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                            </section>
+                                        )}
 
                                         <section className="insightsGrid analysisChartsInsightsGrid">
                                             <article className="card chartCard analysisChartsPanelCard">

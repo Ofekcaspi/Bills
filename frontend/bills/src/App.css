@@ -353,6 +353,24 @@ body {
   padding: 0.5rem;
 }
 
+.analysisChartsPage .anomalyInsightCard {
+  padding: 0.56rem 0.62rem;
+  gap: 0.22rem;
+}
+
+.analysisChartsPage .anomalyInsightIcon {
+  width: 2.3rem;
+  height: 2.3rem;
+}
+
+.analysisChartsPage .anomalyInsightText {
+  font-size: 0.76rem;
+}
+
+.analysisChartsPage .anomalyInsightMeta {
+  font-size: 0.7rem;
+}
+
 .analysisChartsPage .analysisChartsInsightsGrid {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
@@ -704,6 +722,66 @@ body {
 .textButton:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.anomalyInsightCard {
+  border-color: #fed7aa;
+  background: linear-gradient(180deg, #fff7ed, #ffffff);
+  display: flex;
+  flex-direction: column;
+  gap: 0.26rem;
+  padding: 0.72rem 0.8rem;
+}
+
+.anomalyInsightRow {
+  display: flex;
+  align-items: center;
+  gap: 0.62rem;
+}
+
+.anomalyInsightIcon {
+  width: 2.55rem;
+  height: 2.55rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #ea580c;
+  flex: 0 0 auto;
+}
+
+.anomalyInsightContent {
+  display: flex;
+  flex-direction: column;
+  gap: 0.16rem;
+  min-width: 0;
+}
+
+.anomalyInsightRow .anomalyInsightText,
+.anomalyInsightRow .anomalyInsightMeta {
+  text-align: right;
+}
+
+.anomalyInsightIconSvg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.85;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.anomalyInsightText {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.38;
+  color: #7c2d12;
+}
+
+.anomalyInsightMeta {
+  margin: 0;
+  font-size: 0.74rem;
+  color: #9a3412;
 }
 
 .chartCard {

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone as dt_timezone, timezone
+import csv as std_csv
+import io as std_io
+import re as std_re
+import zipfile as std_zipfile
+from datetime import datetime, timedelta, timezone as dt_timezone
 from django.utils import timezone as django_timezone
+from json import dumps as json_dumps
 from pathlib import Path
 
 from django.conf import settings
@@ -11,8 +16,14 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
 from django.db import connection, transaction
+from .chat_service import (
+    ChatServiceError,
+    ensure_session_key,
+    get_or_create_conversation,
+    handle_chat_message,
+)
 from .gmailConnect import GmailAuthService
-from  .models import BillDocument,GmailAccount,Bill,Receipt
+from .models import BillDocument, GmailAccount, Bill, Receipt
 from .gmail_fetcher import fetch_invoice_attachments
 
 
@@ -25,6 +36,34 @@ def _auth_service() -> GmailAuthService:
         tokens_dir=settings.GMAIL_TOKENS_DIR,
         redirect_uri=settings.GMAIL_REDIRECT_URI,
     )
+
+
+@api_view(["POST"])
+def chat_with_openai(request):
+    try:
+        session_key = ensure_session_key(request)
+        if not session_key:
+            raise ChatServiceError("Failed to initialize session for chat", status_code=500)
+
+        conversation = get_or_create_conversation(session_key)
+        previous_response_id_raw = request.data.get("previous_response_id")
+        previous_response_id = (
+            str(previous_response_id_raw).strip()
+            if isinstance(previous_response_id_raw, str)
+            else ""
+        )
+
+        payload = handle_chat_message(
+            conversation=conversation,
+            message=str(request.data.get("message") or ""),
+            previous_response_id=previous_response_id,
+        )
+        return Response(payload, status=status.HTTP_200_OK)
+    except ChatServiceError as exc:
+        return Response(
+            {"ok": False, "error": str(exc)},
+            status=exc.status_code,
+        )
 
 
 # =====================================================
@@ -136,12 +175,12 @@ def update_bill_status(request):
         receipt, _ = Receipt.objects.get_or_create(
             id=document.id,
             defaults={
-                "paid_at": request.data.get("paid_at") or timezone.now().date(),
+                "paid_at": request.data.get("paid_at") or django_timezone.now().date(),
                 "payment_method": request.data.get("payment_method"),
             },
         )
 
-        receipt.paid_at = request.data.get("paid_at") or receipt.paid_at or timezone.now().date()
+        receipt.paid_at = request.data.get("paid_at") or receipt.paid_at or django_timezone.now().date()
         receipt.payment_method = request.data.get("payment_method", receipt.payment_method)
         receipt.save()
 
@@ -442,19 +481,34 @@ def bills_upcoming(request):
     """
     GET /upcoming/?days=14
     """
-    days = int(request.GET.get("days") or 14)
+    try:
+        days = int(request.GET.get("days") or 14)
+    except (TypeError, ValueError):
+        days = 14
+    days = max(0, min(days, 3650))
+
     now = datetime.now(dt_timezone.utc)
     limit = now + timedelta(days=days)
 
     items = []
     for b in Bill.objects.all():
-        if not b.due_date:
+        due_value = b.due_date
+        if not due_value:
             continue
+
         try:
-            d = datetime.fromisoformat(b.due_date)
-            if d.tzinfo is None:
-                d = d.replace(tzinfo=dt_timezone.utc)
-            if now <= d <= limit:
+            if isinstance(due_value, datetime):
+                due_dt = due_value
+            elif isinstance(due_value, str):
+                due_dt = datetime.fromisoformat(due_value)
+            else:
+                # DateField returns a date object (most common path)
+                due_dt = datetime.combine(due_value, datetime.min.time())
+
+            if due_dt.tzinfo is None:
+                due_dt = due_dt.replace(tzinfo=dt_timezone.utc)
+
+            if now <= due_dt <= limit:
                 items.append(b.to_dict())
         except Exception:
             continue
@@ -580,7 +634,7 @@ def _safe_archive_filename(value: str | None, fallback: str) -> str:
     else:
         raw = fallback
 
-    safe = re.sub(r'[<>:"/\\|?*\x00-\x1F]+', "_", raw).strip().strip(".")
+    safe = std_re.sub(r'[<>:"/\\|?*\x00-\x1F]+', "_", raw).strip().strip(".")
     return safe or fallback
 
 
@@ -615,8 +669,8 @@ def export_receipts_report(request):
             status=status.HTTP_404_NOT_FOUND,
         )
 
-    report_stream = io.StringIO()
-    report_writer = csv.writer(report_stream)
+    report_stream = std_io.StringIO()
+    report_writer = std_csv.writer(report_stream)
     report_writer.writerow(
         [
             "id",
@@ -632,12 +686,16 @@ def export_receipts_report(request):
         ]
     )
 
-    archive_buffer = io.BytesIO()
+    archive_buffer = std_io.BytesIO()
     used_filenames = {}
     exported_count = 0
     missing_files = []
 
-    with zipfile.ZipFile(archive_buffer, "w", compression=zipfile.ZIP_DEFLATED) as report_zip:
+    with std_zipfile.ZipFile(
+        archive_buffer,
+        "w",
+        compression=std_zipfile.ZIP_DEFLATED,
+    ) as report_zip:
         for document in documents:
             report_writer.writerow(
                 [
@@ -684,7 +742,7 @@ def export_receipts_report(request):
         if missing_files:
             report_zip.writestr(
                 "missing_files.json",
-                json.dumps(missing_files, ensure_ascii=False, indent=2).encode("utf-8"),
+                json_dumps(missing_files, ensure_ascii=False, indent=2).encode("utf-8"),
             )
 
     if exported_count == 0:
