@@ -466,7 +466,9 @@ def bills_summary(request):
     GET /summary/
     """
     total = 0.0
-    for b in BillDocument.objects.all():
+    for b in BillDocument.objects.filter(
+            document_type=BillDocument.DocumentType.BILL
+    ):
         if b.amount_value is not None:
             total += float(b.amount_value)
 
