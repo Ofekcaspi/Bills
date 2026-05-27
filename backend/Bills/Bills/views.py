@@ -274,7 +274,7 @@ def sync_gmail(request):
     time_window = request.data.get("time_window") or "365d"
 
     query = request.data.get("query") or (
-        '(invoice OR receipt OR "חשבונית" OR "קבלה" OR "Order" OR "הזמנה" OR "חשבונית מס" OR "Tax Invoice")'
+        '(invoice OR receipt OR "חשבונית" OR "קבלה" OR "Order" OR "הזמנה" OR "חשבונית מס" OR "Tax Invoice" OR "שובר" OR "קבלת תשלום",OR "אישור תשלום")'
         'NOT subject:(פרסומת)'
     )
 

@@ -23,7 +23,9 @@ DATE_PATTERN = re.compile(DATE_PATTERN_TEXT)
 #   1 234,56
 #   (123.45)
 # We still validate context before accepting them as amounts.
-AMOUNT_NUMBER_TEXT = r"\(?-?\d{1,3}(?:[,\.\s]\d{3})+(?:[,.]\d{1,2})?\)?|\(?-?\d+(?:[,.]\d{1,2})?\)?"
+# Important: do not allow newline as a thousands separator, otherwise tokens from
+# adjacent lines can merge (e.g. "088\\n663.50"), breaking amount parsing.
+AMOUNT_NUMBER_TEXT = r"\(?-?\d{1,3}(?:[,\.\u00a0 ]\d{3})+(?:[,.]\d{1,2})?\)?|\(?-?\d+(?:[,.]\d{1,2})?\)?"
 AMOUNT_NUMBER_PATTERN = re.compile(AMOUNT_NUMBER_TEXT)
 
 HEB_LETASHLUM = "\u05DC\u05EA\u05E9\u05DC\u05D5\u05DD"  # לתשלום
@@ -58,6 +60,13 @@ POSITIVE_STRONG_LABEL_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
     ("total due", re.compile(r"\btotal\s*due\b", re.IGNORECASE)),
     ("balance due", re.compile(r"\bbalance\s*due\b", re.IGNORECASE)),
     ("payment due", re.compile(r"\bpayment\s*due\b", re.IGNORECASE)),
+    (
+        "החשבון ישולם",
+        re.compile(
+            r"(?:\u05d4)?\u05d7\u05e9\u05d1\u05d5\u05df(?:\s*\u05d6\u05d4)?\s*\u05d9\u05e9\u05d5\u05dc\u05dd",
+            re.IGNORECASE,
+        ),
+    ),
     (
         "שולם סכום",
         re.compile(

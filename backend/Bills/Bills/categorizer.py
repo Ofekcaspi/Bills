@@ -11,8 +11,9 @@ CATEGORY_RULES = [
         r"electric", r"electricity", r"חשמל",
     ]),
     ("מים", [
-        r"מים",
+        r"\bמים\b",
         r"\bמי\b",                 # "מי" כמילה שלמה
+        r"\bmey7\b",
         r"\bמי[-\s]*שתייה\b",      # "מי שתייה" / "מי-שתייה"
         r"water",
         r"מקורות",
@@ -63,16 +64,43 @@ def _norm(s: str) -> str:
     s = s.replace("\u200f", " ").replace("\u200e", " ")
     return s
 
+HEBREW_RE = re.compile(r"[א-ת]+(?:[״׳'][א-ת]+)?")
 
-def classify_category(subject: str | None, sender: str | None, filename: str | None) -> Optional[str]:
+def _reverse_hebrew_words(text: str | None) -> str:
+    """
+    הופך רק מילים בעברית.
+    מילים באנגלית, מספרים וסימנים נשארים כמו שהם.
+    """
+    if not text:
+        return ""
+
+    return HEBREW_RE.sub(lambda m: m.group(0)[::-1], text)
+
+CATEGORY_RULES=[(x[0],[_reverse_hebrew_words(y) for y in x[1]])for x in CATEGORY_RULES]
+def classify_category(
+        subject: str | None,
+        sender: str | None,
+        filename: str | None
+) -> Optional[str]:
     """
     מחזיר שם קטגוריה בעברית או None.
+    אם יש מילים בעברית שהגיעו הפוכות/בכיוון בעייתי,
+    הפונקציה הופכת רק את המילים בעברית לפני הסיווג.
     """
-    hay = _norm(f"{subject or ''} {sender or ''} {filename or ''}")
+
+    text = " ".join([
+        _reverse_hebrew_words(subject),
+        _reverse_hebrew_words(sender),
+        _reverse_hebrew_words(filename),
+    ])
+
+    hay = _norm(text)
+
+    print(hay)
 
     for cat, patterns in CATEGORY_RULES:
         for p in patterns:
-            if re.search(p, hay, flags=re.IGNORECASE):
+            if re.search(p, hay, flags=re.IGNORECASE) or re.search(p, hay, flags=re.IGNORECASE):
                 return cat
 
     return None
