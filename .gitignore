@@ -9,3 +9,5 @@ backend/Bills/token.json
 temp
 backend/Bills/downloads
 backend/Bills/gmail_tokens
+backend/Bills/.env
+backend/Bills/db.sqlite3
