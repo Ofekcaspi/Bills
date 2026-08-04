@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date
 from pathlib import Path
@@ -7,9 +8,10 @@ from typing import Iterable
 
 import pdfplumber
 
-HEBREW_WORD_PATTERN = re.compile(r"[\u0590-\u05FF]+")
-HAS_HEBREW_PATTERN = re.compile(r"[\u0590-\u05FF]")
-CONTROL_MARKS_PATTERN = re.compile(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+from .hebrew_text import fix_hebrew_word_order
+from .text_cleaning import clean_text
+
+logger = logging.getLogger(__name__)
 
 DATE_PATTERN_TEXT = r"\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2}"
 DATE_PATTERN = re.compile(DATE_PATTERN_TEXT)
@@ -187,48 +189,9 @@ DUE_LABEL_PATTERN = (
 )
 
 
-def _reverse_text_for_print(text: str) -> str:
-    fixed_lines: list[str] = []
-    for line in text.splitlines():
-        words = line.split()
-        if not words:
-            fixed_lines.append("")
-            continue
-
-        output_words: list[str] = []
-        i = 0
-        while i < len(words):
-            if HAS_HEBREW_PATTERN.search(words[i]):
-                hebrew_run: list[str] = []
-                while i < len(words) and HAS_HEBREW_PATTERN.search(words[i]):
-                    fixed_token = HEBREW_WORD_PATTERN.sub(
-                        lambda m: m.group(0)[::-1],
-                        words[i],
-                    )
-                    hebrew_run.append(fixed_token)
-                    i += 1
-                output_words.extend(reversed(hebrew_run))
-                continue
-
-            output_words.append(words[i])
-            i += 1
-
-        fixed_lines.append(" ".join(output_words))
-
-    return "\n".join(fixed_lines)
-
-
-def _clean_text(text: str) -> str:
-    if not text:
-        return ""
-    cleaned = CONTROL_MARKS_PATTERN.sub("", text)
-    cleaned = cleaned.replace("\u00a0", " ")
-    return cleaned
-
-
 def _normalize_text_for_parsing(text: str) -> str:
-    normalized = _reverse_text_for_print(text)
-    return _clean_text(normalized)
+    normalized = fix_hebrew_word_order(text)
+    return clean_text(normalized)
 
 
 def _parse_amount_number(token: str) -> float | None:
@@ -275,7 +238,7 @@ def _detect_currency(text: str) -> str | None:
     return None
 
 
-def _spans_for(pattern: re.Pattern, text: str) -> list[tuple[int, int]]:
+def _find_pattern_positions(pattern: re.Pattern, text: str) -> list[tuple[int, int]]:
     return [m.span() for m in pattern.finditer(text)]
 
 
@@ -293,7 +256,7 @@ def _looks_like_identifier(context: str) -> bool:
 
 
 def _normalize_label_line(line: str) -> str:
-    normalized = _clean_text(line).lower()
+    normalized = clean_text(line).lower()
     normalized = normalized.replace("\u05F4", '"').replace("\u05F3", "'").replace("`", "'")
 
     # Common OCR confusions for English total labels.
@@ -344,6 +307,8 @@ def _label_matches_for_line(line: str) -> list[dict[str, int | str]]:
     return matches
 
 
+# Gap in characters between two spans on the same line; 0 if they overlap.
+# Used to rank how close a number is to a "total"-style label — closer wins.
 def _span_distance(a_start: int, a_end: int, b_start: int, b_end: int) -> int:
     if a_end <= b_start:
         return b_start - a_end
@@ -386,7 +351,9 @@ def _extract_surrounding_token(text: str, start: int, end: int) -> str:
     return text[left:right]
 
 
-def _is_embedded_in_alnum_token(text: str, start: int, end: int) -> bool:
+# True when the number is stuck to letters/slashes (order #, tracking code, URL)
+# rather than standing alone — those shouldn't be picked up as a money amount.
+def _is_number_id_tag(text: str, start: int, end: int) -> bool:
     token = _extract_surrounding_token(text, start, end)
     token_lower = token.lower()
 
@@ -435,11 +402,137 @@ def _nearby_indexes(index: int, total: int) -> Iterable[int]:
             yield i
 
 
+def _score_candidate(
+        match: re.Match,
+        text: str,
+        *,
+        date_spans: list[tuple[int, int]],
+        line_rows: list[tuple[str, int, int]],
+        normalized_lines: list[str],
+        line_label_scores: list[tuple[int, str | None]],
+        line_label_matches: list[list[dict[str, int | str]]],
+        total_lines: int,
+) -> dict | None:
+    """Scores one AMOUNT_NUMBER_PATTERN match as a money candidate, or returns None to reject it."""
+    raw = match.group(0)
+    start, end = match.span()
+
+    if _inside_any_span(start, end, date_spans):
+        return None
+
+    value = _parse_amount_number(raw)
+    if value is None:
+        return None
+
+    if value > 200_000:
+        return None
+
+    if _looks_like_year(value, raw):
+        return None
+
+    # Avoid fragments in dates like 10/05/2026 even if the regex saw just "10".
+    before = text[max(0, start - 1):start]
+    after = text[end:end + 1]
+    if before in {"/", "-"} or after in {"/", "-"}:
+        return None
+    if _is_number_id_tag(text, start, end):
+        return None
+
+    line_index = _line_index_for_position(line_rows, start)
+    _, line_start, _ = line_rows[line_index]
+    candidate_start_in_line = start - line_start
+    candidate_end_in_line = end - line_start
+    same_line_matches = line_label_matches[line_index]
+    prev_line_score, prev_line_label = line_label_scores[line_index - 1] if line_index > 0 else (0, None)
+    next_line_score, next_line_label = (
+        line_label_scores[line_index + 1] if line_index + 1 < total_lines else (0, None)
+    )
+
+    label_score = 0
+    matched_label: str | None = None
+    proximity_score = 0
+
+    best_same_line_rank: tuple[int, int, int] | None = None
+    for match_info in same_line_matches:
+        match_start = int(match_info["start"])
+        match_end = int(match_info["end"])
+        match_score = int(match_info["score"])
+        distance = _span_distance(candidate_start_in_line, candidate_end_in_line, match_start, match_end)
+        match_proximity = _same_line_proximity_score(distance)
+        if match_proximity <= 0:
+            continue
+
+        # Prefer stronger label and closer distance.
+        rank = (match_score, match_proximity, -distance)
+        if best_same_line_rank is None or rank > best_same_line_rank:
+            best_same_line_rank = rank
+            label_score = match_score
+            proximity_score = match_proximity
+            matched_label = str(match_info["label"])
+
+    if best_same_line_rank is not None:
+        pass
+    elif prev_line_score > 0:
+        label_score = prev_line_score
+        matched_label = prev_line_label
+        proximity_score = 20
+    elif next_line_score > 0:
+        label_score = next_line_score
+        matched_label = next_line_label
+        proximity_score = 10
+    else:
+        # Candidate is too far from a total label.
+        return None
+
+    context = text[max(0, start - 80): min(len(text), end + 80)]
+    tight_context = text[max(0, start - 15): min(len(text), end + 15)]
+
+    if "%" in tight_context:
+        return None
+
+    if _is_plain_large_integer(raw, value):
+        identifier_context = f"{normalized_lines[line_index]} {context.lower()}"
+        if _contains_identifier_keyword(identifier_context):
+            return None
+
+    currency = _detect_currency(tight_context) or _detect_currency(context)
+    has_currency_nearby = currency is not None
+
+    score = 0
+    score += label_score
+    score += proximity_score
+    if has_currency_nearby:
+        score += 10
+
+    if line_index >= int(total_lines * 0.75):
+        score += 15
+
+    if any(_line_has_negative_amount_context(normalized_lines[i]) for i in _nearby_indexes(line_index, total_lines)):
+        score -= 80
+
+    if _looks_like_identifier(context):
+        score -= 8
+    if DATE_PATTERN.search(context):
+        score -= 4
+
+    return {
+        "score": score,
+        "value": round(value, 2),
+        "currency": currency,
+        "raw": raw,
+        "context": context,
+        "position": start,
+        "line_index": line_index,
+        "matched_label": matched_label,
+        "label_score": label_score,
+    }
+
+
 def _money_candidates(text: str):
     """
     Yield money-like candidates with strong preference for final payable totals.
     """
-    date_spans = _spans_for(DATE_PATTERN, text)
+    date_spans = _find_pattern_positions(DATE_PATTERN, text)
     line_rows = _split_lines_with_offsets(text)
     normalized_lines = [_normalize_label_line(line) for line, _, _ in line_rows]
     line_label_scores = [_best_positive_label_for_line(line) for line in normalized_lines]
@@ -450,123 +543,26 @@ def _money_candidates(text: str):
     if not has_any_positive_label:
         return
 
+    total_lines = max(1, len(line_rows))
+
     for match in AMOUNT_NUMBER_PATTERN.finditer(text):
-        raw = match.group(0)
-        start, end = match.span()
-
-        if _inside_any_span(start, end, date_spans):
-            continue
-
-        value = _parse_amount_number(raw)
-        if value is None:
-            continue
-
-        if value > 200_000:
-            continue
-
-        if _looks_like_year(value, raw):
-            continue
-
-        # Avoid fragments in dates like 10/05/2026 even if the regex saw just "10".
-        before = text[max(0, start - 1):start]
-        after = text[end:end + 1]
-        if before in {"/", "-"} or after in {"/", "-"}:
-            continue
-        if _is_embedded_in_alnum_token(text, start, end):
-            continue
-
-        line_index = _line_index_for_position(line_rows, start)
-        total_lines = max(1, len(line_rows))
-        _, line_start, _ = line_rows[line_index]
-        candidate_start_in_line = start - line_start
-        candidate_end_in_line = end - line_start
-        same_line_matches = line_label_matches[line_index]
-        prev_line_score, prev_line_label = line_label_scores[line_index - 1] if line_index > 0 else (0, None)
-        next_line_score, next_line_label = (
-            line_label_scores[line_index + 1] if line_index + 1 < total_lines else (0, None)
+        candidate = _score_candidate(
+            match,
+            text,
+            date_spans=date_spans,
+            line_rows=line_rows,
+            normalized_lines=normalized_lines,
+            line_label_scores=line_label_scores,
+            line_label_matches=line_label_matches,
+            total_lines=total_lines,
         )
-
-        label_score = 0
-        matched_label: str | None = None
-        proximity_score = 0
-
-        best_same_line_rank: tuple[int, int, int] | None = None
-        for match_info in same_line_matches:
-            match_start = int(match_info["start"])
-            match_end = int(match_info["end"])
-            match_score = int(match_info["score"])
-            distance = _span_distance(candidate_start_in_line, candidate_end_in_line, match_start, match_end)
-            match_proximity = _same_line_proximity_score(distance)
-            if match_proximity <= 0:
-                continue
-
-            # Prefer stronger label and closer distance.
-            rank = (match_score, match_proximity, -distance)
-            if best_same_line_rank is None or rank > best_same_line_rank:
-                best_same_line_rank = rank
-                label_score = match_score
-                proximity_score = match_proximity
-                matched_label = str(match_info["label"])
-
-        if best_same_line_rank is not None:
-            pass
-        elif prev_line_score > 0:
-            label_score = prev_line_score
-            matched_label = prev_line_label
-            proximity_score = 20
-        elif next_line_score > 0:
-            label_score = next_line_score
-            matched_label = next_line_label
-            proximity_score = 10
-        else:
-            # Candidate is too far from a total label.
-            continue
-
-        context = text[max(0, start - 80): min(len(text), end + 80)]
-        tight_context = text[max(0, start - 15): min(len(text), end + 15)]
-
-        if "%" in tight_context:
-            continue
-
-        if _is_plain_large_integer(raw, value):
-            identifier_context = f"{normalized_lines[line_index]} {context.lower()}"
-            if _contains_identifier_keyword(identifier_context):
-                continue
-
-        currency = _detect_currency(tight_context) or _detect_currency(context)
-        has_currency_nearby = currency is not None
-
-        score = 0
-        score += label_score
-        score += proximity_score
-        if has_currency_nearby:
-            score += 10
-
-        if line_index >= int(total_lines * 0.75):
-            score += 15
-
-        if any(_line_has_negative_amount_context(normalized_lines[i]) for i in _nearby_indexes(line_index, total_lines)):
-            score -= 80
-
-        if _looks_like_identifier(context):
-            score -= 8
-        if DATE_PATTERN.search(context):
-            score -= 4
-
-        yield {
-            "score": score,
-            "value": round(value, 2),
-            "currency": currency,
-            "raw": raw,
-            "context": context,
-            "position": start,
-            "line_index": line_index,
-            "matched_label": matched_label,
-            "label_score": label_score,
-        }
+        if candidate is not None:
+            yield candidate
 
 
-def _extract_amount_and_currency_with_meta(text: str) -> tuple[float | None, str | None, bool]:
+# The bool return is "confidence": True means a strong total-style label (e.g.
+# "לתשלום", "amount due") was actually matched next to the number, not just guessed.
+def _extract_amount_currency_and_confidence(text: str) -> tuple[float | None, str | None, bool]:
     candidates = list(_money_candidates(text))
 
     if not candidates:
@@ -579,7 +575,7 @@ def _extract_amount_and_currency_with_meta(text: str) -> tuple[float | None, str
 
 
 def _extract_amount_and_currency(text: str) -> tuple[float | None, str | None]:
-    amount_value, amount_currency, _ = _extract_amount_and_currency_with_meta(text)
+    amount_value, amount_currency, _ = _extract_amount_currency_and_confidence(text)
     return amount_value, amount_currency
 
 
@@ -626,8 +622,8 @@ def _extract_due_date(text: str) -> str | None:
     return None
 
 
-def _analyze_fields(text: str) -> dict:
-    amount_value, amount_currency, amount_is_explicit = _extract_amount_and_currency_with_meta(text)
+def _extract_amount_and_due_date(text: str) -> dict:
+    amount_value, amount_currency, amount_is_explicit = _extract_amount_currency_and_confidence(text)
     due_date_iso = _extract_due_date(text)
     return {
         "amount_value": amount_value,
@@ -637,6 +633,9 @@ def _analyze_fields(text: str) -> dict:
     }
 
 
+# Ranks how "complete" an extraction looks. analyze_text() runs extraction twice
+# (once on the raw text, once with Hebrew word order fixed) and keeps the
+# higher-scoring result, since either pass can win depending on the document.
 def _analysis_score(fields: dict) -> int:
     score = 0
     if fields.get("amount_value") is not None:
@@ -659,14 +658,14 @@ def extract_text_from_pdf(path: str | Path) -> str:
             for page in pdf.pages:
                 page_texts.append(page.extract_text() or "")
     except Exception as exc:
-        print(f"[PDF_ANALYSIS] failed to extract text from {pdf_path}: {exc}")
+        logger.warning("Failed to extract text from %s: %s", pdf_path, exc)
         return ""
 
     return "\n".join(t for t in page_texts if t).strip()
 
 
 def analyze_text(text: str, *, source_label: str = "text") -> dict:
-    cleaned_text = _clean_text(text or "").strip()
+    cleaned_text = clean_text(text or "").strip()
     if not cleaned_text:
         return {
             "text": "",
@@ -675,9 +674,9 @@ def analyze_text(text: str, *, source_label: str = "text") -> dict:
             "due_date_iso": None,
         }
 
-    raw_fields = _analyze_fields(cleaned_text)
+    raw_fields = _extract_amount_and_due_date(cleaned_text)
     normalized_text = _normalize_text_for_parsing(cleaned_text)
-    normalized_fields = _analyze_fields(normalized_text)
+    normalized_fields = _extract_amount_and_due_date(normalized_text)
 
     primary = raw_fields
     secondary = normalized_fields

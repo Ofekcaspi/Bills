@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from .hebrew_text import reverse_hebrew_words
+
 
 # סדר חשוב: הראשון שתופס ינצח
 CATEGORY_RULES = [
@@ -57,50 +59,67 @@ CATEGORY_RULES = [
 ]
 
 
-def _norm(s: str) -> str:
+def _normalize_text(s: str) -> str:
     s = s or ""
     s = s.lower()
-    # ניקוי בסיסי
-    s = s.replace("\u200f", " ").replace("\u200e", " ")
+    s = s.replace("‏", " ").replace("‎", " ")
     return s
 
-HEBREW_RE = re.compile(r"[א-ת]+(?:[״׳'][א-ת]+)?")
+CATEGORY_RULES=[(x[0],[reverse_hebrew_words(y) for y in x[1]])for x in CATEGORY_RULES]
 
-def _reverse_hebrew_words(text: str | None) -> str:
-    """
-    הופך רק מילים בעברית.
-    מילים באנגלית, מספרים וסימנים נשארים כמו שהם.
-    """
-    if not text:
-        return ""
 
-    return HEBREW_RE.sub(lambda m: m.group(0)[::-1], text)
+class BillCategorizer:
+    """Matches a bill's subject/sender/filename against CATEGORY_RULES."""
 
-CATEGORY_RULES=[(x[0],[_reverse_hebrew_words(y) for y in x[1]])for x in CATEGORY_RULES]
+    def __init__(self, rules=CATEGORY_RULES):
+        self.rules = rules
+
+    def classify(
+            self,
+            subject: str | None,
+            sender: str | None,
+            filename: str | None,
+    ) -> Optional[str]:
+        """
+        מחזיר שם קטגוריה בעברית או None.
+        אם יש מילים בעברית שהגיעו הפוכות/בכיוון בעייתי,
+        הפונקציה הופכת רק את המילים בעברית לפני הסיווג.
+        """
+        haystack = self._build_haystack(subject, sender, filename)
+
+        for category, patterns in self.rules:
+            if self._any_pattern_matches(patterns, haystack):
+                return category
+
+        return None
+
+    def _build_haystack(
+            self,
+            subject: str | None,
+            sender: str | None,
+            filename: str | None,
+    ) -> str:
+        text = " ".join([
+            reverse_hebrew_words(subject),
+            reverse_hebrew_words(sender),
+            reverse_hebrew_words(filename),
+        ])
+        return _normalize_text(text)
+
+    @staticmethod
+    def _any_pattern_matches(patterns, haystack: str) -> bool:
+        return any(
+            re.search(pattern, haystack, flags=re.IGNORECASE)
+            for pattern in patterns
+        )
+
+
+_default_categorizer = BillCategorizer()
+
+
 def classify_category(
         subject: str | None,
         sender: str | None,
-        filename: str | None
+        filename: str | None,
 ) -> Optional[str]:
-    """
-    מחזיר שם קטגוריה בעברית או None.
-    אם יש מילים בעברית שהגיעו הפוכות/בכיוון בעייתי,
-    הפונקציה הופכת רק את המילים בעברית לפני הסיווג.
-    """
-
-    text = " ".join([
-        _reverse_hebrew_words(subject),
-        _reverse_hebrew_words(sender),
-        _reverse_hebrew_words(filename),
-    ])
-
-    hay = _norm(text)
-
-    print(hay)
-
-    for cat, patterns in CATEGORY_RULES:
-        for p in patterns:
-            if re.search(p, hay, flags=re.IGNORECASE) or re.search(p, hay, flags=re.IGNORECASE):
-                return cat
-
-    return None
+    return _default_categorizer.classify(subject, sender, filename)

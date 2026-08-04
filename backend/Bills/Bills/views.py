@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import csv as std_csv
-import io as std_io
-import re as std_re
-import zipfile as std_zipfile
+import csv
+import io
+import json
+import zipfile
 from datetime import datetime, timedelta, timezone as dt_timezone
 from django.utils import timezone as django_timezone
-from json import dumps as json_dumps
 from pathlib import Path
 
 from django.conf import settings
@@ -24,7 +23,14 @@ from .chat_service import (
 )
 from .gmailConnect import GmailAuthService
 from .models import BillDocument, GmailAccount, Bill, Receipt
-from .gmail_fetcher import fetch_invoice_attachments
+from .gmail_fetcher import GmailInvoiceFetcher
+from .file_naming import safe_filename, dedupe_filename
+
+
+DEFAULT_SYNC_QUERY = (
+    '(invoice OR receipt OR "חשבונית" OR "קבלה" OR "Order" OR "הזמנה" OR "חשבונית מס" OR "Tax Invoice" OR "שובר" OR "קבלת תשלום",OR "אישור תשלום")'
+    'NOT subject:(פרסומת)'
+)
 
 
 # =====================================================
@@ -36,6 +42,10 @@ def _auth_service() -> GmailAuthService:
         tokens_dir=settings.GMAIL_TOKENS_DIR,
         redirect_uri=settings.GMAIL_REDIRECT_URI,
     )
+
+
+def _error_response(message: str, status_code: int) -> Response:
+    return Response({"error": message}, status=status_code)
 
 
 @api_view(["POST"])
@@ -132,6 +142,8 @@ def gmail_connect(request):
     request.session["gmail_oauth_state"] = new_state
 
     return redirect(auth_url)
+
+
 # =====================================================
 # POST /sync/ – סנכרון Gmail → downloads/ + DB
 # =====================================================
@@ -148,6 +160,8 @@ def window_to_dates(time_window: str | None):
     days = days_map.get(time_window or "365d", 365)
     now = django_timezone.now()
     return now - timedelta(days=days), now
+
+
 @api_view(["PATCH"])
 def update_bill_status(request):
     bill_id = request.data.get("bill_id")
@@ -155,18 +169,12 @@ def update_bill_status(request):
     try:
         document = BillDocument.objects.get(id=bill_id)
     except BillDocument.DoesNotExist:
-        return Response(
-            {"error": "Bill document not found"},
-            status=status.HTTP_404_NOT_FOUND,
-        )
+        return _error_response("Bill document not found", status.HTTP_404_NOT_FOUND)
 
     new_status = (request.data.get("status") or "").lower().strip()
 
     if new_status not in ["bill", "receipt"]:
-        return Response(
-            {"error": "status must be either 'bill' or 'receipt'"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return _error_response("status must be either 'bill' or 'receipt'", status.HTTP_400_BAD_REQUEST)
 
     if new_status == "receipt":
         document.document_type = BillDocument.DocumentType.RECEIPT
@@ -208,6 +216,7 @@ def update_bill_status(request):
         status=status.HTTP_200_OK,
     )
 
+
 def calculate_fetch_ranges(gmail_account: GmailAccount, requested_from, requested_until):
     if not gmail_account.synced_from or not gmail_account.synced_until:
         return [(requested_from, requested_until)]
@@ -227,109 +236,31 @@ def calculate_fetch_ranges(gmail_account: GmailAccount, requested_from, requeste
 
     return fetch_ranges
 
-@api_view(["POST"])
-def sync_gmail(request):
-    auth = _auth_service()
 
-    gmail_account_id = request.session.get("gmail_account_id")
+def _select_gmail_account(request, auth: GmailAuthService):
+    """
+    Picks the session's preferred Gmail account if it's still active and has
+    valid creds, otherwise falls back to the next active account that does.
+    Returns (gmail_account, creds) or (None, None) if nothing usable is found.
+    """
+    preferred_id = request.session.get("gmail_account_id")
     active_accounts = list(
         GmailAccount.objects.filter(is_active=True).order_by("-updated_at")
     )
 
-    if not active_accounts:
-        return Response(
-            {"ok": False, "error": "not_connected"},
-            status=status.HTTP_401_UNAUTHORIZED,
-        )
-
-    selected_account = None
-
-    # Keep the session-preferred account first (if still active), then fallback to others.
-    candidates = []
-    if gmail_account_id:
-        preferred = next((acc for acc in active_accounts if acc.id == gmail_account_id), None)
-        if preferred is not None:
-            candidates.append(preferred)
-
-    for acc in active_accounts:
-        if not any(existing.id == acc.id for existing in candidates):
-            candidates.append(acc)
+    # Try the session-preferred account first, keep the rest in their original order.
+    candidates = sorted(active_accounts, key=lambda acc: acc.id != preferred_id)
 
     for candidate in candidates:
         creds = auth.ensure_valid_creds(candidate)
         if creds:
-            selected_account = candidate
-            break
+            return candidate, creds
 
-    if not selected_account:
-        return Response(
-            {"ok": False, "error": "not_connected"},
-            status=status.HTTP_401_UNAUTHORIZED,
-        )
+    return None, None
 
-    request.session["gmail_account_id"] = selected_account.id
-    request.session.modified = True
-    gmail_account = selected_account
 
-    time_window = request.data.get("time_window") or "365d"
-
-    query = request.data.get("query") or (
-        '(invoice OR receipt OR "חשבונית" OR "קבלה" OR "Order" OR "הזמנה" OR "חשבונית מס" OR "Tax Invoice" OR "שובר" OR "קבלת תשלום",OR "אישור תשלום")'
-        'NOT subject:(פרסומת)'
-    )
-
-    max_results = int(request.data.get("max_results") or 20)
-
-    requested_from, requested_until = window_to_dates(time_window)
-
-    fetch_ranges = calculate_fetch_ranges(
-        gmail_account=gmail_account,
-        requested_from=requested_from,
-        requested_until=requested_until,
-    )
-
-    if not fetch_ranges:
-        gmail_account.last_synced_at = django_timezone.now()
-        gmail_account.last_sync_window = time_window
-        gmail_account.last_sync_count = 0
-        gmail_account.save(update_fields=[
-            "last_synced_at",
-            "last_sync_window",
-            "last_sync_count",
-            "updated_at",
-        ])
-
-        return Response(
-            {
-                "ok": True,
-                "status": "already_synced",
-                "gmail_account": gmail_account.google_email,
-                "requested_from": requested_from.isoformat(),
-                "requested_until": requested_until.isoformat(),
-                "synced_from": gmail_account.synced_from.isoformat() if gmail_account.synced_from else None,
-                "synced_until": gmail_account.synced_until.isoformat() if gmail_account.synced_until else None,
-                "fetched": 0,
-                "created": 0,
-                "updated": 0,
-                "saved_objects": [],
-            },
-            status=status.HTTP_200_OK,
-        )
-
-    rows = []
-
-    for fetch_from, fetch_until in fetch_ranges:
-        batch_rows = fetch_invoice_attachments(
-            creds=creds,
-            downloads_dir=settings.BILLS_DOWNLOADS_DIR,
-            query=query,
-            my_email=gmail_account.google_email,
-            max_results=max_results,
-            start_date=fetch_from,
-            end_date=fetch_until,
-        )
-        rows.extend(batch_rows)
-
+def _persist_fetched_rows(rows: list[dict], gmail_account: GmailAccount):
+    """Upserts fetched bill/receipt rows into the DB. Returns (created, updated, saved_objects)."""
     created = 0
     updated = 0
     saved_objects = []
@@ -396,6 +327,78 @@ def sync_gmail(request):
             "attachment_id": obj.attachment_id,
         })
 
+    return created, updated, saved_objects
+
+
+@api_view(["POST"])
+def sync_gmail(request):
+    auth = _auth_service()
+
+    gmail_account, creds = _select_gmail_account(request, auth)
+    if not gmail_account:
+        return Response(
+            {"ok": False, "error": "not_connected"},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    request.session["gmail_account_id"] = gmail_account.id
+    request.session.modified = True
+
+    time_window = request.data.get("time_window") or "365d"
+    query = request.data.get("query") or DEFAULT_SYNC_QUERY
+    max_results = int(request.data.get("max_results") or 20)
+
+    requested_from, requested_until = window_to_dates(time_window)
+
+    fetch_ranges = calculate_fetch_ranges(
+        gmail_account=gmail_account,
+        requested_from=requested_from,
+        requested_until=requested_until,
+    )
+
+    if not fetch_ranges:
+        gmail_account.last_synced_at = django_timezone.now()
+        gmail_account.last_sync_window = time_window
+        gmail_account.last_sync_count = 0
+        gmail_account.save(update_fields=[
+            "last_synced_at",
+            "last_sync_window",
+            "last_sync_count",
+            "updated_at",
+        ])
+
+        return Response(
+            {
+                "ok": True,
+                "status": "already_synced",
+                "gmail_account": gmail_account.google_email,
+                "requested_from": requested_from.isoformat(),
+                "requested_until": requested_until.isoformat(),
+                "synced_from": gmail_account.synced_from.isoformat() if gmail_account.synced_from else None,
+                "synced_until": gmail_account.synced_until.isoformat() if gmail_account.synced_until else None,
+                "fetched": 0,
+                "created": 0,
+                "updated": 0,
+                "saved_objects": [],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    fetcher = GmailInvoiceFetcher(creds)
+    rows = []
+
+    for fetch_from, fetch_until in fetch_ranges:
+        rows.extend(fetcher.fetch(
+            downloads_dir=settings.BILLS_DOWNLOADS_DIR,
+            query=query,
+            my_email=gmail_account.google_email,
+            max_results=max_results,
+            start_date=fetch_from,
+            end_date=fetch_until,
+        ))
+
+    created, updated, saved_objects = _persist_fetched_rows(rows, gmail_account)
+
     gmail_account.synced_from = (
         min(gmail_account.synced_from, requested_from)
         if gmail_account.synced_from
@@ -443,6 +446,8 @@ def sync_gmail(request):
         },
         status=status.HTTP_200_OK,
     )
+
+
 # =====================================================
 # GET /bills/ – רשימת חשבוניות
 # =====================================================
@@ -544,20 +549,19 @@ def serve_file(request, path: str):
         open(target, "rb"),
         content_type=content_type,
     )
+
+
 @api_view(["DELETE"])
 def clean_db(request):
     sql_path = Path(__file__).resolve().parent / "clean_db_script.sql"
 
     if not sql_path.exists():
-        return Response(
-            {"error": f"SQL script not found at {sql_path}"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        return _error_response(f"SQL script not found at {sql_path}", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     if connection.vendor != "sqlite":
-        return Response(
-            {"error": f"clean_db is intended for SQLite, but current DB vendor is '{connection.vendor}'"},
-            status=status.HTTP_400_BAD_REQUEST,
+        return _error_response(
+            f"clean_db is intended for SQLite, but current DB vendor is '{connection.vendor}'",
+            status.HTTP_400_BAD_REQUEST,
         )
 
     try:
@@ -585,10 +589,9 @@ def clean_db(request):
         )
 
     except Exception as e:
-        return Response(
-            {"error": str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        return _error_response(str(e), status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 def _resolve_saved_file_path(saved_path: str | None) -> Path | None:
     if not saved_path:
         return None
@@ -629,50 +632,10 @@ def _resolve_saved_file_path(saved_path: str | None) -> Path | None:
     return None
 
 
-def _safe_archive_filename(value: str | None, fallback: str) -> str:
-    raw = (value or "").strip()
-    if raw:
-        raw = raw.replace("\\", "/").split("/")[-1]
-    else:
-        raw = fallback
-
-    safe = std_re.sub(r'[<>:"/\\|?*\x00-\x1F]+', "_", raw).strip().strip(".")
-    return safe or fallback
-
-
-@api_view(["POST"])
-def export_receipts_report(request):
-    raw_ids = request.data.get("document_ids")
-    if not isinstance(raw_ids, list) or not raw_ids:
-        return Response(
-            {"error": "document_ids must be a non-empty list"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    document_ids = []
-    for raw_id in raw_ids:
-        try:
-            document_ids.append(int(raw_id))
-        except (TypeError, ValueError):
-            continue
-
-    if not document_ids:
-        return Response(
-            {"error": "No valid document IDs were provided"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    documents = list(
-        BillDocument.objects.filter(id__in=document_ids).order_by("-msg_date", "-id")
-    )
-    if not documents:
-        return Response(
-            {"error": "No documents found for the selected IDs"},
-            status=status.HTTP_404_NOT_FOUND,
-        )
-
-    report_stream = std_io.StringIO()
-    report_writer = std_csv.writer(report_stream)
+def _write_receipts_archive(documents: list[BillDocument]):
+    """Builds the CSV summary + zip of receipt files for export_receipts_report. Returns (buffer, exported_count, missing_files)."""
+    report_stream = io.StringIO()
+    report_writer = csv.writer(report_stream)
     report_writer.writerow(
         [
             "id",
@@ -688,15 +651,15 @@ def export_receipts_report(request):
         ]
     )
 
-    archive_buffer = std_io.BytesIO()
+    archive_buffer = io.BytesIO()
     used_filenames = {}
     exported_count = 0
     missing_files = []
 
-    with std_zipfile.ZipFile(
+    with zipfile.ZipFile(
         archive_buffer,
         "w",
-        compression=std_zipfile.ZIP_DEFLATED,
+        compression=zipfile.ZIP_DEFLATED,
     ) as report_zip:
         for document in documents:
             report_writer.writerow(
@@ -726,16 +689,8 @@ def export_receipts_report(request):
                 continue
 
             fallback_name = f"receipt_{document.id}{resolved_file.suffix or '.pdf'}"
-            base_name = _safe_archive_filename(document.filename or resolved_file.name, fallback_name)
-
-            next_index = used_filenames.get(base_name, 0) + 1
-            used_filenames[base_name] = next_index
-            if next_index > 1:
-                stem = Path(base_name).stem
-                suffix = Path(base_name).suffix
-                archive_name = f"receipts/{stem}_{next_index}{suffix}"
-            else:
-                archive_name = f"receipts/{base_name}"
+            base_name = safe_filename(document.filename or resolved_file.name, fallback_name)
+            archive_name = f"receipts/{dedupe_filename(base_name, used_filenames)}"
 
             report_zip.write(resolved_file, arcname=archive_name)
             exported_count += 1
@@ -744,14 +699,38 @@ def export_receipts_report(request):
         if missing_files:
             report_zip.writestr(
                 "missing_files.json",
-                json_dumps(missing_files, ensure_ascii=False, indent=2).encode("utf-8"),
+                json.dumps(missing_files, ensure_ascii=False, indent=2).encode("utf-8"),
             )
 
+    return archive_buffer, exported_count, missing_files
+
+
+@api_view(["POST"])
+def export_receipts_report(request):
+    raw_ids = request.data.get("document_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return _error_response("document_ids must be a non-empty list", status.HTTP_400_BAD_REQUEST)
+
+    document_ids = []
+    for raw_id in raw_ids:
+        try:
+            document_ids.append(int(raw_id))
+        except (TypeError, ValueError):
+            continue
+
+    if not document_ids:
+        return _error_response("No valid document IDs were provided", status.HTTP_400_BAD_REQUEST)
+
+    documents = list(
+        BillDocument.objects.filter(id__in=document_ids).order_by("-msg_date", "-id")
+    )
+    if not documents:
+        return _error_response("No documents found for the selected IDs", status.HTTP_404_NOT_FOUND)
+
+    archive_buffer, exported_count, missing_files = _write_receipts_archive(documents)
+
     if exported_count == 0:
-        return Response(
-            {"error": "No receipt files found for the selected documents"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return _error_response("No receipt files found for the selected documents", status.HTTP_400_BAD_REQUEST)
 
     archive_buffer.seek(0)
     timestamp = django_timezone.now().strftime("%Y%m%d_%H%M%S")
