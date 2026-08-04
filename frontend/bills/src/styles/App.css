@@ -467,7 +467,7 @@ body {
   min-height: 54px;
 }
 
-.card {
+.panelCard {
   border: 1px solid var(--line);
   border-radius: var(--radius-xl);
   background: linear-gradient(180deg, #ffffff, #f8fbff);
@@ -475,7 +475,7 @@ body {
   padding: 0.96rem;
 }
 
-.center {
+.centeredStatus {
   min-height: 100px;
   display: grid;
   place-items: center;
@@ -1540,7 +1540,7 @@ body {
   padding: 0.52rem 0.84rem;
 }
 
-.small {
+.buttonSmall {
   padding: 0.38rem 0.58rem;
   font-size: 0.78rem;
 }
