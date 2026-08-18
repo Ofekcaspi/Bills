@@ -1,4 +1,4 @@
-## Bills — Automated Invoice & Receipt Tracker
+## Bills - Automated Invoice & Receipt Tracker
 
 Tracking invoices and receipts from email is a routine but tedious part of managing a household or small business. Bills for electricity, water, municipal tax, internet, mobile, insurance, rent, and more mostly arrive via email, yet many people still track them manually — through mailbox folders or plain memory. This is slow, error-prone, and can lead to missed payment deadlines.
 
