@@ -42,8 +42,7 @@
       body: JSON.stringify({ credential: idToken }),
     });
 
-    const data = await res.json();
-    console.log("server response:", data);
+    await res.json();
   };
 </script>
 </body>

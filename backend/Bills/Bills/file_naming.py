@@ -1,5 +1,5 @@
-"""Shared filesystem/archive naming helpers: making a name safe to write, and
-making sure it doesn't collide with a name that's already been used."""
+"""Helpers for cleaning up file names and making sure two files don't
+ end up with the same name."""
 from __future__ import annotations
 
 import re
@@ -10,10 +10,9 @@ _UNSAFE_CHARS_PATTERN = re.compile(r'[<>:"/\\|?*\x00-\x1F]+')
 
 def safe_filename(name: str | None, fallback: str = "file") -> str:
     """
-    Strips path separators and any character the filesystem/zip format can't
-    store, collapses them to a single "_", and drops a trailing ".". Falls back
-    to `fallback` if nothing usable is left (e.g. name was empty or all unsafe
-    characters).
+    Cleans up a name so it's safe to save as a file: swaps out characters
+    that aren't allowed in file names for "_", and uses a fallback name if
+    nothing usable is left (e.g. the name was empty or was all bad characters).
     """
     raw = (name or "").strip()
     if raw:
@@ -26,7 +25,7 @@ def safe_filename(name: str | None, fallback: str = "file") -> str:
 
 
 def make_unique_path(path: Path) -> Path:
-    """Appends _2, _3, ... to the filename until it doesn't collide with an existing file on disk."""
+    """If a file with this name already exists, keeps adding _2, _3, and so on until the name is free."""
     if not path.exists():
         return path
 
@@ -42,9 +41,9 @@ def make_unique_path(path: Path) -> Path:
 
 def dedupe_filename(base_name: str, used_counts: dict[str, int]) -> str:
     """
-    Same _2, _3, ... collision avoidance as make_unique_path, but against an
-    in-memory tally (used_counts, mutated in place) instead of the filesystem —
-    for building a zip archive, where there's no on-disk file to check.
+    Does the same _2, _3, ... renaming as make_unique_path, but for names that
+    aren't real files yet — like when building a zip file — so it just keeps
+    a running count instead of checking the disk.
     """
     next_index = used_counts.get(base_name, 0) + 1
     used_counts[base_name] = next_index

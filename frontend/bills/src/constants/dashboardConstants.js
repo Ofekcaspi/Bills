@@ -1,5 +1,9 @@
+// Shared numbers, labels, and settings used 
+// across the dashboard pages.
+
 export const API_BASE = "http://127.0.0.1:8000";
 export const DUE_SOON_DAYS = 14;
+// Where "marked as paid" bills are remembered in the browser, since the backend doesn't track that yet.
 export const PAID_STORAGE_KEY = "bills_paid_ids_v1";
 export const SUMMARY_DEFAULT = { total: 0, gmail_connected: false, connected_email: "", connected_user: "" };
 export const DEFAULT_TIME_WINDOW = "365d";
@@ -42,8 +46,13 @@ export const SORT_OPTIONS = [
 ];
 
 export const CATEGORY_CHART_COLORS = ["#2563eb", "#ef4444", "#10b981", "#f59e0b", "#8b5cf6", "#06b6d4", "#e11d48", "#84cc16"];
+
+// How much a category's spending has to jump before we flag it as unusual.
 export const ANOMALY_MIN_INCREASE_RATIO = 0.5;
 export const ANOMALY_MIN_PREVIOUS_AMOUNT = 80;
 export const ANOMALY_MIN_DELTA_AMOUNT = 50;
+
 export const ELECTRICITY_CATEGORY = "חשמל";
+
+// Invisible text-direction marks that can sneak into category names copied from emails/PDFs.
 export const CONTROL_MARKS_REGEX = /[\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g;

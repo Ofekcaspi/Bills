@@ -1,3 +1,4 @@
+"""The API endpoints: connecting Gmail, syncing bills/receipts from it, and serving them (and their files) back to the frontend."""
 from __future__ import annotations
 
 import csv
@@ -81,6 +82,12 @@ def chat_with_openai(request):
 # =====================================================
 @api_view(["GET"])
 def gmail_connect(request):
+    """
+    One endpoint, three jobs depending on what's in the request:
+    Google sending us back a code -> finish connecting.
+    Already connected this session -> just confirm that.
+    Otherwise -> send the user to Google to sign in.
+    """
     auth = _auth_service()
 
     code = request.GET.get("code")
@@ -164,6 +171,7 @@ def window_to_dates(time_window: str | None):
 
 @api_view(["PATCH"])
 def update_bill_status(request):
+    """Lets the user manually fix a document that got auto-classified as the wrong type (bill vs receipt)."""
     bill_id = request.data.get("bill_id")
 
     try:
@@ -218,6 +226,7 @@ def update_bill_status(request):
 
 
 def calculate_fetch_ranges(gmail_account: GmailAccount, requested_from, requested_until):
+    """Figures out which date ranges still need fetching from Gmail, skipping whatever's already been synced."""
     if not gmail_account.synced_from or not gmail_account.synced_until:
         return [(requested_from, requested_until)]
 
@@ -306,6 +315,8 @@ def _persist_fetched_rows(rows: list[dict], gmail_account: GmailAccount):
         if is_created:
             created += 1
         else:
+            # Only fill in fields that are still empty, so a re-sync never
+            # overwrites something that was already saved (e.g. edited by hand).
             changed = False
             update_fields = []
 
@@ -356,6 +367,7 @@ def sync_gmail(request):
         requested_until=requested_until,
     )
 
+    # Nothing new to fetch — this date range's already been synced.
     if not fetch_ranges:
         gmail_account.last_synced_at = django_timezone.now()
         gmail_account.last_sync_window = time_window
@@ -504,6 +516,7 @@ def bills_upcoming(request):
             continue
 
         try:
+            # due_date might be stored as a few different shapes depending on how it was saved.
             if isinstance(due_value, datetime):
                 due_dt = due_value
             elif isinstance(due_value, str):
@@ -538,6 +551,7 @@ def serve_file(request, path: str):
     base = Path(settings.BILLS_DOWNLOADS_DIR).resolve()
     target = (base / path).resolve()
 
+    # Make sure the requested path can't escape the downloads folder (e.g. "../../etc/passwd").
     if not str(target).startswith(str(base)) or not target.exists():
         raise Http404("File not found")
 
@@ -553,6 +567,7 @@ def serve_file(request, path: str):
 
 @api_view(["DELETE"])
 def clean_db(request):
+    """Wipes the local database back to empty — for local dev/testing only, not safe to run on a real database."""
     sql_path = Path(__file__).resolve().parent / "clean_db_script.sql"
 
     if not sql_path.exists():
@@ -593,6 +608,7 @@ def clean_db(request):
 
 
 def _resolve_saved_file_path(saved_path: str | None) -> Path | None:
+    """Turns a stored file path into a real file on disk, but only if it's actually inside the downloads folder."""
     if not saved_path:
         return None
 

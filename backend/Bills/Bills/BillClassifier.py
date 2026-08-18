@@ -1,4 +1,3 @@
-import logging
 import pickle
 import re
 from pathlib import Path
@@ -10,11 +9,9 @@ from sklearn.pipeline import Pipeline
 
 from .hebrew_text import reverse_words_char_by_char
 
-logger = logging.getLogger(__name__)
-
 
 class DocumentTextExtractor:
-    """Reads the raw words out of a .pdf or .txt file."""
+    """Reads the words (unproccessed) out of a .pdf or .txt file."""
 
     def extract_words(self, file_path: Path) -> list[str]:
         file_path = Path(file_path)
@@ -41,15 +38,11 @@ class DocumentTextExtractor:
                     if "text" in word_data:
                         words.append(word_data["text"])
 
-                logger.debug("pdf words: %s", words[:10])
-
         return words
 
     def _from_txt(self, txt_path: Path) -> list[str]:
         text = txt_path.read_text(encoding="utf-8", errors="replace")
-        words = reverse_words_char_by_char(text)
-        logger.debug("txt words: %s", words[:10])
-        return words
+        return reverse_words_char_by_char(text)
 
 
 def clean_words(words):
@@ -95,7 +88,7 @@ def get_document_files(folder_path: Path):
 def words_to_document(words):
     return " ".join(words)
 
-
+#hardcoded reciept indicators
 RECEIPT_KEYWORDS = [
     "קבלה",
     "receipt",
@@ -116,12 +109,8 @@ RECEIPT_KEYWORDS = [
 
 class SklearnNaiveBayesClassifier:
     """
-    Two-stage bill/receipt/general classifier.
-
-    NOTE: instances of this class are pickled to disk (bill_receipt_general_sklearn_nb.pkl).
-    Do not rename this class or move it to a different module — pickle resolves
-    objects by class name + module path, and doing either breaks loading the
-    already-trained model on disk.
+    bill/receipt/general classifier, a project specific wrapper for Sklearn naive bayes implementation
+    train once then re use saved model weights, saved to pkl file
     """
 
     def __init__(self):
@@ -140,6 +129,7 @@ class SklearnNaiveBayesClassifier:
         self.is_trained = False
 
     def train_from_folders(self, folders):
+        """Train the model from a folder path containing labeled examples of financial/general docs."""
         texts = []
         labels = []
 
@@ -156,8 +146,8 @@ class SklearnNaiveBayesClassifier:
                     texts.append(words_to_document(words))
                     labels.append(label)
 
-                except Exception as e:
-                    logger.warning("Could not read %s: %s", file_path, e)
+                except Exception:
+                    continue
 
         if not texts:
             raise ValueError("No training documents found.")
@@ -174,6 +164,8 @@ class SklearnNaiveBayesClassifier:
         return self._classify_words(words, subject)
 
     def decide_bill_or_receipt_from_subject(self, subject: str) -> str:
+        """If model decides that doc X is a financial doc
+        , then we determine Bill/receipt via keywords in subject."""
         if not subject:
             return "bill"
 
@@ -188,6 +180,7 @@ class SklearnNaiveBayesClassifier:
         if not self.is_trained:
             raise ValueError("Classifier is not trained.")
 
+        # Bayes' rule: invert the trained - P(words | class) into P(class | words).
         text = words_to_document(words)
 
         prediction = self.model.predict([text])[0]
@@ -208,6 +201,7 @@ class SklearnNaiveBayesClassifier:
 
 
 def save_model(classifier, model_path: Path):
+    """Persist an existing trained model after training."""
     model_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(model_path, "wb") as f:
@@ -215,16 +209,14 @@ def save_model(classifier, model_path: Path):
 
 
 def load_or_train_classifier(model_path: Path, folders):
+    #if model exists, load it, else train
     if model_path.exists():
-        logger.info("Loading model...")
         with open(model_path, "rb") as f:
             return pickle.load(f)
 
-    logger.info("Training model...")
     classifier = SklearnNaiveBayesClassifier()
     classifier.train_from_folders(folders)
     save_model(classifier, model_path)
-    logger.info("Model saved to %s", model_path)
     return classifier
 
 

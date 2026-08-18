@@ -1,3 +1,4 @@
+"""Talks to OpenAI to answer chat questions about the user's bills/receipts, backed by a summary of their data."""
 from __future__ import annotations
 
 import json as std_json
@@ -28,6 +29,7 @@ def ensure_session_key(request) -> str:
     if session_key:
         return session_key
 
+    # Django doesn't hand out a session ID until something's actually saved to it.
     request.session.save()
     return request.session.session_key or ""
 
@@ -38,6 +40,7 @@ def get_or_create_conversation(session_key: str) -> ChatConversation:
 
 
 def _build_chat_context_payload() -> dict:
+    """Puts together a summary of the user's bills/receipts (totals, categories, recent items) to hand to the AI model, since it can't look at the database itself."""
     documents = list(BillDocument.objects.order_by("-msg_date", "-id")[:CHAT_CONTEXT_LIMIT])
 
     category_totals = defaultdict(float)
@@ -112,6 +115,7 @@ def _build_chat_context_payload() -> dict:
 
 
 def _build_chat_instructions(context_payload: dict) -> str:
+    """Bundles the summary data into the model's instructions, so it answers from real numbers instead of guessing."""
     return (
         "You are a finance assistant inside a bills dashboard app. "
         "Answer in Hebrew by default, unless the user clearly asks in another language. "
@@ -122,6 +126,7 @@ def _build_chat_instructions(context_payload: dict) -> str:
 
 
 def _extract_openai_text(response_payload: dict) -> str:
+    """OpenAI's reply can come in a couple different shapes — this handles both, and falls back to any refusal message the model gave."""
     direct_text = response_payload.get("output_text")
     if isinstance(direct_text, str) and direct_text.strip():
         return direct_text.strip()
@@ -161,6 +166,7 @@ def _extract_openai_error(response_payload: dict) -> str:
 
 
 def _send_openai_request(*, message: str, instructions: str, model: str, previous_response_id: str) -> dict:
+    """Sends the message to OpenAI and returns its reply, turning any network/response problem into a clean error."""
     api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise ChatServiceError("OPENAI_API_KEY is not configured on the server", status_code=500)
@@ -216,6 +222,7 @@ def handle_chat_message(
     message: str,
     previous_response_id: str | None = None,
 ) -> dict:
+    """Saves the user's message, asks OpenAI for a reply using their bill/receipt summary as context, saves that reply, and returns it."""
     message_text = (message or "").strip()
     if not message_text:
         raise ChatServiceError("message is required", status_code=400)
@@ -229,6 +236,7 @@ def handle_chat_message(
     context_payload = _build_chat_context_payload()
     instructions = _build_chat_instructions(context_payload)
     model = (os.getenv("OPENAI_CHAT_MODEL") or DEFAULT_OPENAI_CHAT_MODEL).strip()
+    # Prefer the ID the frontend just sent; otherwise carry on from the last one we saved.
     effective_previous_response_id = (
         (previous_response_id or "").strip() or (conversation.previous_response_id or "")
     )

@@ -1,3 +1,4 @@
+// The reports page: filters bills/receipts down to a set, then lets the user export them as a zip report.
 import { QUICK_FILTERS, SORT_OPTIONS, STATUS_OPTIONS, TIME_WINDOW_OPTIONS } from "../constants/dashboardConstants.js";
 import { fileUrlFromSavedPath, formatDate, formatMoney, formatSenderName } from "../utils/billUtils.js";
 

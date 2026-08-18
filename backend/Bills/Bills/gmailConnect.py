@@ -1,3 +1,5 @@
+"""Handles connecting a user's Gmail account: sending them to Google to approve
+access, and saving/reusing their login token afterward."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,6 +19,8 @@ User = get_user_model()
 
 
 class GmailAuthService:
+    """Walks a user through connecting their Gmail account and keeps their login token usable."""
+
     def __init__(
             self,
             *,
@@ -44,6 +48,8 @@ class GmailAuthService:
     def start_oauth(self) -> tuple[str, str]:
         flow = self.build_flow()
 
+        # Always show the consent screen and ask for offline access, so we get
+        # a token we can refresh later instead of one that dies when the tab closes.
         auth_url, state = flow.authorization_url(
             access_type="offline",
             include_granted_scopes="false",
@@ -53,6 +59,7 @@ class GmailAuthService:
         return auth_url, state
 
     def finish_oauth(self, *, state: str, code: str) -> GmailAccount:
+        """Takes the code Google sent back, figures out who signed in, and saves their token for later use."""
         flow = self.build_flow(state=state)
         flow.fetch_token(code=code)
 
@@ -118,6 +125,7 @@ class GmailAuthService:
         gmail_account.save(update_fields=["is_active", "updated_at"])
 
     def ensure_valid_creds(self, gmail_account: GmailAccount) -> Optional[Credentials]:
+        """Gets a usable token for this account: reuses it if still valid, refreshes it if expired, or forgets it if that fails."""
         creds = self.load_creds(gmail_account)
 
         if not creds:

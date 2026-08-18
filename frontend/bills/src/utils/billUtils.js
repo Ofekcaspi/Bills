@@ -1,3 +1,4 @@
+// Small helper functions for formatting and reading bill data, shared across the dashboard pages.
 import { API_BASE, CONTROL_MARKS_REGEX, ELECTRICITY_CATEGORY } from "../constants/dashboardConstants.js";
 
 export function toNumber(value) {
@@ -53,10 +54,12 @@ export function buildRecentMonthKeys(count) {
     });
 }
 
+// Picks whichever ID is available so the same bill gets the same key every time, even if some data is missing.
 export function getStableBillId(item) {
     return String(item.message_id ?? item.id ?? item.filename ?? "");
 }
 
+// Pulls the actual file name out of a file-download response header.
 export function filenameFromContentDisposition(headerValue) {
     if (!headerValue) return "";
 
@@ -84,6 +87,7 @@ export function formatMoney(value, currency = "") {
     return `${formatted} ${currency}`.trim();
 }
 
+// Turns the path we stored in the database into a URL the browser can actually open.
 export function fileUrlFromSavedPath(savedPath) {
     if (!savedPath) return "";
     const normalized = savedPath.replaceAll("\\", "/");

@@ -1,3 +1,4 @@
+// Calls to the backend API: fetching bills, syncing Gmail, exporting reports, and chatting.
 import { API_BASE, SUMMARY_DEFAULT } from "../constants/dashboardConstants.js";
 
 export async function fetchDashboardData() {
@@ -25,6 +26,7 @@ export async function syncBillsFromGmail(windowValue) {
         body: JSON.stringify({ max_results: 100, time_window: windowValue }),
     });
 
+    // 401 means Gmail isn't connected yet — send the user to sign in instead of failing.
     if (res.status === 401) {
         window.location.href = `${API_BASE}/connect-email/`;
         return { redirected: true };

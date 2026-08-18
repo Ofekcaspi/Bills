@@ -1,6 +1,7 @@
+"""Reads a bill/receipt (PDF or plain text)
+ and pulls out the amount owed and due date."""
 from __future__ import annotations
 
-import logging
 import re
 from datetime import date
 from pathlib import Path
@@ -10,8 +11,6 @@ import pdfplumber
 
 from .hebrew_text import fix_hebrew_word_order
 from .text_cleaning import clean_text
-
-logger = logging.getLogger(__name__)
 
 DATE_PATTERN_TEXT = r"\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2}"
 DATE_PATTERN = re.compile(DATE_PATTERN_TEXT)
@@ -48,6 +47,7 @@ HEB_KOTSH_NOQUOTE = "\u05E7\u05D5\u05D8\u05E9"  # קוטש
 HEB_YAMIM = "\u05D9\u05DE\u05D9\u05DD"  # ימים
 HEB_SHAOT = "\u05E9\u05E2\u05D5\u05EA"  # שעות
 
+# Phrases that almost certainly mark the actual amount owed.
 POSITIVE_STRONG_LABEL_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
     ("לתשלום", re.compile(r"\u05DC\u05EA\u05E9\u05DC\u05D5[\u05DD\u05E1]")),
     (
@@ -79,6 +79,7 @@ POSITIVE_STRONG_LABEL_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
     ("to pay", re.compile(r"\bto\s*pay\b", re.IGNORECASE)),
 )
 
+# Weaker "total"-style phrases — could just be a subtotal, so they count for less.
 POSITIVE_MEDIUM_LABEL_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
     (HEB_SAHAK, re.compile(r"\u05E1\u05D4[\"'`\u05F3\u05F4]?\u05DB")),
     (HEB_KSAH, re.compile(r"\u05DB[\"'`\u05F3\u05F4]?\u05E1\u05D4")),
@@ -91,6 +92,7 @@ POSITIVE_MEDIUM_LABEL_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
     ("total", re.compile(r"(?<!sub)\btotal\b", re.IGNORECASE)),
 )
 
+# Phrases next to a number that mean it's NOT the amount owed (tax, discount, etc.).
 NEGATIVE_AMOUNT_LABEL_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"\bsubtotal\b", re.IGNORECASE),
     re.compile(r"\bsub\s*total\b", re.IGNORECASE),
@@ -110,6 +112,7 @@ NEGATIVE_AMOUNT_LABEL_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"\u05D6\u05D9\u05DB\u05D5\u05D9"),  # זיכוי
 )
 
+# Words that mean a nearby number is something else entirely (a meter reading, an ID) — not money.
 NOISE_KEYWORDS = (
     HEB_KOTSH,
     HEB_KOTSH_NOQUOTE,
@@ -136,6 +139,7 @@ NOISE_KEYWORDS = (
     "קריאה",
 )
 
+# Words that mean a nearby number is an order/invoice/reference number — not money.
 IDENTIFIER_KEYWORDS = (
     "order",
     "order number",
@@ -171,6 +175,7 @@ CURRENCY_TOKEN_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Hebrew and English ways of saying "payment due".
 DUE_LABEL_PATTERN = (
     "(?:"
     "\u05DC\u05EA\u05E9\u05DC\u05D5\u05DD\\s*\u05E2\u05D3"  # לתשלום עד
@@ -195,6 +200,7 @@ def _normalize_text_for_parsing(text: str) -> str:
 
 
 def _parse_amount_number(token: str) -> float | None:
+    """Turns a matched number like "1,234.56" or "1.234,56" into a plain float, figuring out which mark is the decimal point."""
     s = token.strip()
     negative = s.startswith("(") and s.endswith(")")
     s = s.strip("()")
@@ -247,6 +253,7 @@ def _inside_any_span(start: int, end: int, spans: list[tuple[int, int]]) -> bool
 
 
 def _looks_like_year(value: float, raw: str) -> bool:
+    """A plain 4-digit number in a normal year range is probably a year, not an amount of money."""
     return "." not in raw and "," not in raw and 1900 <= value <= 2100
 
 
@@ -256,6 +263,7 @@ def _looks_like_identifier(context: str) -> bool:
 
 
 def _normalize_label_line(line: str) -> str:
+    """Cleans up a line of text so our label phrases (like "total") can match it reliably."""
     normalized = clean_text(line).lower()
     normalized = normalized.replace("\u05F4", '"').replace("\u05F3", "'").replace("`", "'")
 
@@ -273,6 +281,7 @@ def _normalize_label_line(line: str) -> str:
 
 
 def _best_positive_label_for_line(line: str) -> tuple[int, str | None]:
+    """Finds the strongest "total amount" phrase on this line, if any, and how confident we are in it."""
     best_score = 0
     best_label: str | None = None
 
@@ -294,6 +303,7 @@ def _line_has_negative_amount_context(line: str) -> bool:
 
 
 def _label_matches_for_line(line: str) -> list[dict[str, int | str]]:
+    """Finds every "total amount" phrase on this line and exactly where it sits, so we can tell which number it's closest to."""
     matches: list[dict[str, int | str]] = []
 
     for label, pattern in POSITIVE_STRONG_LABEL_PATTERNS:
@@ -318,6 +328,7 @@ def _span_distance(a_start: int, a_end: int, b_start: int, b_end: int) -> int:
 
 
 def _same_line_proximity_score(distance: int) -> int:
+    """The closer a number sits to a label, the more likely it's the right one — these cutoffs are just tuned by trial and error."""
     if distance <= 40:
         return 30
     if distance <= 80:
@@ -328,6 +339,7 @@ def _same_line_proximity_score(distance: int) -> int:
 
 
 def _is_plain_large_integer(raw: str, value: float) -> bool:
+    """True for a big whole number like 123456 — could be a real amount, or could be an order/reference number, so it needs a closer look."""
     s = raw.strip().strip("()")
     if s.startswith("-"):
         s = s[1:]
@@ -342,6 +354,7 @@ def _contains_identifier_keyword(text: str) -> bool:
 
 
 def _extract_surrounding_token(text: str, start: int, end: int) -> str:
+    """Grabs the whole word touching this position, e.g. sees "usd120" as one piece instead of just "120"."""
     left = start
     right = end
     while left > 0 and not text[left - 1].isspace():
@@ -374,6 +387,7 @@ def _is_number_id_tag(text: str, start: int, end: int) -> bool:
 
 
 def _split_lines_with_offsets(text: str) -> list[tuple[str, int, int]]:
+    """Breaks the text into lines, remembering where each line starts and ends in the original text."""
     rows: list[tuple[str, int, int]] = []
     offset = 0
     for raw_line in text.splitlines(keepends=True):
@@ -580,6 +594,7 @@ def _extract_amount_and_currency(text: str) -> tuple[float | None, str | None]:
 
 
 def _parse_date_to_iso(date_text: str) -> str | None:
+    """Turns a date like "05/03/2026" or "2026-03-05" into ISO format, guessing day-vs-year order from how long each piece is."""
     cleaned = date_text.replace(".", "/").replace("-", "/")
     parts = cleaned.split("/")
     if len(parts) != 3:
@@ -602,6 +617,7 @@ def _parse_date_to_iso(date_text: str) -> str | None:
 
 
 def _extract_due_date(text: str) -> str | None:
+    """Looks for a due-date phrase (like "due date" or "לתשלום עד") sitting next to a date, in either order, and returns that date."""
     compact = re.sub(r"\s+", " ", text)
     patterns = [
         re.compile(
@@ -657,8 +673,7 @@ def extract_text_from_pdf(path: str | Path) -> str:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
                 page_texts.append(page.extract_text() or "")
-    except Exception as exc:
-        logger.warning("Failed to extract text from %s: %s", pdf_path, exc)
+    except Exception:
         return ""
 
     return "\n".join(t for t in page_texts if t).strip()

@@ -6,7 +6,7 @@ from typing import Optional
 from .hebrew_text import reverse_hebrew_words
 
 
-# סדר חשוב: הראשון שתופס ינצח
+#this module determines the category of the invoice
 CATEGORY_RULES = [
     ("חשמל", [
         r"\biec\b", r"\bישראל\s*אלקטריק\b", r"\bחברת\s*החשמל\b",
@@ -80,11 +80,7 @@ class BillCategorizer:
             sender: str | None,
             filename: str | None,
     ) -> Optional[str]:
-        """
-        מחזיר שם קטגוריה בעברית או None.
-        אם יש מילים בעברית שהגיעו הפוכות/בכיוון בעייתי,
-        הפונקציה הופכת רק את המילים בעברית לפני הסיווג.
-        """
+        
         haystack = self._build_haystack(subject, sender, filename)
 
         for category, patterns in self.rules:

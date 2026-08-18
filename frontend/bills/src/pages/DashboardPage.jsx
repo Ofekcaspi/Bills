@@ -1,3 +1,4 @@
+// The dashboard page: owns all app state (bills, filters, chat) and renders whichever screen is active.
 import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
     ANOMALY_MIN_DELTA_AMOUNT,
@@ -115,6 +116,7 @@ export default function DashboardPage() {
         chatMessagesRef.current.scrollTop = chatMessagesRef.current.scrollHeight;
     }, [chatMessages, chatSending]);
 
+    // Closes the sync popover when the user clicks outside it or presses Escape.
     useEffect(() => {
         if (!isSyncModalOpen) return undefined;
 
@@ -138,6 +140,7 @@ export default function DashboardPage() {
         };
     }, [isSyncModalOpen, isSyncingBills]);
 
+    // Wraps setPaidIds so every change is also saved to localStorage.
     function updatePaidIds(updater) {
         setPaidIds((prev) => {
             const next = updater(prev);
@@ -365,6 +368,9 @@ export default function DashboardPage() {
             };
         });
 
+        // Electricity bills sometimes come in twice (more than one email for the same
+        // bill), and there's no shared ID to match them on — so treat two electricity
+        // bills with the same amount and currency as duplicates and keep only one.
         const seenElectricityBills = new Set();
         return mappedItems.filter((item) => {
             if (!isElectricityCategory(item.category)) return true;
@@ -398,6 +404,7 @@ export default function DashboardPage() {
             if (selectedBillStatus === "unpaid" && item.isPaid) return false;
             if (selectedBillStatus === "paid" && !item.isPaid) return false;
 
+            // 500+ counts as "high amount" for this quick filter.
             if (selectedBillQuickFilter === "high_amount" && (item.amount === null || item.amount < 500)) return false;
             if (selectedBillQuickFilter === "uncategorized" && item.category) return false;
             if (selectedBillQuickFilter === "missing_amount" && item.amount !== null) return false;
@@ -431,6 +438,7 @@ export default function DashboardPage() {
                 return bDate - aDate;
             }
 
+            // Default order: unpaid before paid, then overdue, then due-soon, then by due date.
             if (a.isPaid !== b.isPaid) return a.isPaid ? 1 : -1;
             if (a.isOverdue !== b.isOverdue) return a.isOverdue ? -1 : 1;
             if (a.isDueSoon !== b.isDueSoon) return a.isDueSoon ? -1 : 1;
@@ -494,6 +502,7 @@ export default function DashboardPage() {
                 return bDate - aDate;
             }
 
+            // Default order: unpaid before paid, then overdue, then due-soon, then by due date.
             if (a.isPaid !== b.isPaid) return a.isPaid ? 1 : -1;
             if (a.isOverdue !== b.isOverdue) return a.isOverdue ? -1 : 1;
             if (a.isDueSoon !== b.isDueSoon) return a.isDueSoon ? -1 : 1;
@@ -568,6 +577,8 @@ export default function DashboardPage() {
             totals.set(key, (totals.get(key) || 0) + item.amount);
         });
 
+        // For a fixed window (e.g. "last 12 months"), always show that many months,
+        // even the empty ones — otherwise just show whichever months have data.
         const fixedMonthCount = TIME_WINDOW_MONTH_COUNT[analysisTimeWindow] ?? null;
         const keys = fixedMonthCount ? buildRecentMonthKeys(fixedMonthCount) : Array.from(totals.keys()).sort();
 
@@ -583,6 +594,7 @@ export default function DashboardPage() {
         return monthlySeries.reduce((max, bucket) => Math.max(max, bucket.total), 0);
     }, [monthlySeries]);
 
+    // Converts each month's total into x/y coordinates on a 0-100 grid, for drawing the line chart.
     const chartPoints = useMemo(() => {
         if (!monthlySeries.length) {
             return [];
@@ -631,6 +643,7 @@ export default function DashboardPage() {
 
     const isDenseMonthlyChart = chartPoints.length >= 10;
 
+    // Thins out the x-axis month labels when there are a lot of them, so they don't overlap.
     const chartAxisStep = useMemo(() => {
         if (chartPoints.length >= 12) return 2;
         if (chartPoints.length >= 9) return 2;
@@ -701,6 +714,8 @@ export default function DashboardPage() {
             .slice(0, 8);
     }, [analysisFilteredItems]);
 
+    // Turns each category's share of the total into a slice of the donut chart
+    // (stroke-dasharray/dashoffset is how you draw a partial-circle arc in SVG).
     const categoryChart = useMemo(() => {
         const slicesSource = categorySeries.filter((entry) => entry.total > 0);
         const total = slicesSource.reduce((sum, entry) => sum + entry.total, 0);
@@ -741,6 +756,10 @@ export default function DashboardPage() {
         }));
     }, [categoryChart]);
 
+    // Looks for a category whose most recent bill jumped a lot compared to the one
+    // before it, to flag as a heads-up banner. Needs at least two bills in that
+    // category, and the jump has to clear all three thresholds below (not just one)
+    // so a small, expected variation doesn't get flagged as an anomaly.
     const anomalyInsight = useMemo(() => {
         const groupedByCategory = new Map();
 
@@ -797,6 +816,8 @@ export default function DashboardPage() {
         return bestCandidate;
     }, [monthlySourceItems]);
 
+    // The bills-table screen and the charts screen show different slices of the same
+    // data, so pick whichever one matches the screen that's actually showing.
     const visibleAnalysisItems = isAnalysisBillsScreen ? filteredBills : analysisFilteredItems;
     const analysisViewStats = isAnalysisBillsScreen ? stats : analysisStats;
     const animatedHomeBillsCount = useAnimatedNumber(normalizedItems.length);

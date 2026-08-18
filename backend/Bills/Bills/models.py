@@ -1,3 +1,4 @@
+"""The database tables: connected Gmail accounts, the bills/receipts found in them, and chat history."""
 from django.db import models
 from django.conf import settings
 
@@ -16,6 +17,8 @@ class GmailAccount(models.Model):
 
     last_synced_at = models.DateTimeField(blank=True, null=True)
 
+    # Which date range of emails we've already checked, so a future sync only
+    # has to fetch what's new instead of re-scanning everything.
     synced_from = models.DateTimeField(blank=True, null=True)
     synced_until = models.DateTimeField(blank=True, null=True)
     last_sync_window = models.CharField(max_length=32, blank=True, null=True)
@@ -36,6 +39,8 @@ class GmailAccount(models.Model):
         return f"{self.user} -> {self.google_email}"
 
 class BillDocument(models.Model):
+    """Every bill/receipt starts as one of these; Bill and Receipt below add their own extra fields on top."""
+
     class DocumentType(models.TextChoices):
         BILL = "bill", "Bill"
         RECEIPT = "receipt", "Receipt"
@@ -85,6 +90,8 @@ class BillDocument(models.Model):
     def user(self):
         return self.gmail_account.user if self.gmail_account else None
 
+    # Django automatically adds .bill / .receipt once a row's type is set below;
+    # these just return None instead of raising if it isn't that type yet.
     def get_bill_instance(self):
         try:
             return self.bill
@@ -145,6 +152,7 @@ class Bill(BillDocument):
         verbose_name_plural = "Bills"
 
     def save(self, *args, **kwargs):
+        # Always stamp the type, so this row knows it's a Bill even if it was created directly.
         self.document_type = BillDocument.DocumentType.BILL
         super().save(*args, **kwargs)
 
@@ -169,6 +177,7 @@ class Receipt(BillDocument):
         verbose_name_plural = "Receipts"
 
     def save(self, *args, **kwargs):
+        # Always stamp the type, so this row knows it's a Receipt even if it was created directly.
         self.document_type = BillDocument.DocumentType.RECEIPT
         super().save(*args, **kwargs)
 
@@ -186,6 +195,7 @@ class Receipt(BillDocument):
 
 class ChatConversation(models.Model):
     session_key = models.CharField(max_length=64, unique=True)
+    # Which OpenAI reply this conversation should continue from next time.
     previous_response_id = models.CharField(max_length=128, blank=True, null=True)
     model_name = models.CharField(max_length=64, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)

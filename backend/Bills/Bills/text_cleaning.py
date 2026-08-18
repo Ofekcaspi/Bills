@@ -3,10 +3,6 @@ from __future__ import annotations
 
 import re
 
-# Bidi/embedding/isolate direction-control marks plus BOM. These are invisible
-# but interleave with real characters in text copied from Gmail or PDFs, and
-# will silently break regex matches (e.g. a label + amount that "look" adjacent
-# but have a direction-control mark sitting between them) if left in.
 CONTROL_MARKS_PATTERN = re.compile(r"[‎‏‪-‮⁦-⁩﻿]")
 
 

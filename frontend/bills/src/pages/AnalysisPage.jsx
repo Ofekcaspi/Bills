@@ -1,3 +1,5 @@
+// The analysis/charts page: spending trend, category breakdown,
+//  and the AI insights chat.
 import { TIME_WINDOW_OPTIONS } from "../constants/dashboardConstants.js";
 import { formatDate, formatMoney } from "../utils/billUtils.js";
 
@@ -276,6 +278,7 @@ export default function AnalysisPage(props) {
                                             className="chatInput"
                                             value={chatInput}
                                             onChange={(event) => setChatInput(event.target.value)}
+                                            // Enter sends the message; Shift+Enter adds a new line.
                                             onKeyDown={(event) => {
                                                 if (event.key === "Enter" && !event.shiftKey) {
                                                     event.preventDefault();

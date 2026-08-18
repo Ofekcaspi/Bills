@@ -1,3 +1,4 @@
+// The full bills table: KPI totals, filters, and the list of every bill/receipt.
 import { QUICK_FILTERS, SORT_OPTIONS, STATUS_OPTIONS, TIME_WINDOW_OPTIONS } from "../constants/dashboardConstants.js";
 import { fileUrlFromSavedPath, formatDate, getBillStatus, formatMoney, formatSenderName } from "../utils/billUtils.js";
 

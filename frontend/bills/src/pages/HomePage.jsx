@@ -1,3 +1,4 @@
+// The home/overview page: KPI totals plus a list of the most recent bills.
 import { fileUrlFromSavedPath, formatDate, getBillStatus, formatMoney, formatSenderName } from "../utils/billUtils.js";
 
 export default function HomePage(props) {

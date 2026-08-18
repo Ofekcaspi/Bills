@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import email.utils
-import logging
 import re
 from pathlib import Path
 from typing import List, Optional
@@ -17,10 +16,9 @@ from .pdf_analysis import analyze_pdf, analyze_text
 from .BillClassifier import get_bill_receipt_general_classifier
 from .file_naming import safe_filename, make_unique_path
 
-logger = logging.getLogger(__name__)
-
 
 def _parse_rfc2822_date(s: str) -> Optional[datetime]:
+    """Reads the date out of an email header, assuming UTC if none is given."""
     try:
         dt = email.utils.parsedate_to_datetime(s)
         if dt and dt.tzinfo is None:
@@ -35,6 +33,7 @@ def _headers_dict(headers: list[dict]) -> dict[str, str]:
 
 
 def _extract_part_charset(part: dict) -> Optional[str]:
+    """Looks through an email part's headers for which text encoding it uses."""
     for header in (part.get("headers") or []):
         if (header.get("name") or "").lower() != "content-type":
             continue
@@ -46,6 +45,7 @@ def _extract_part_charset(part: dict) -> Optional[str]:
 
 
 def _decode_gmail_body_data(data: str, *, charset: Optional[str] = None) -> str:
+    """Turns the raw email data into readable text, trying a few encodings until one works."""
     if not data:
         return ""
     try:
@@ -71,7 +71,7 @@ def _decode_gmail_body_data(data: str, *, charset: Optional[str] = None) -> str:
 
 
 def _iter_mime_parts(payload: dict):
-    """Yields a MIME part and all of its nested sub-parts, depth-first."""
+    """Goes through an email piece by piece, including everything nested inside it."""
     if not payload:
         return
     yield payload
@@ -80,6 +80,7 @@ def _iter_mime_parts(payload: dict):
 
 
 def _extract_email_body_text(service, msg_id: str, payload: dict) -> str:
+    """Pulls the readable text out of an email, preferring plain text over HTML."""
     plain_parts: list[str] = []
     html_parts: list[str] = []
 
@@ -153,7 +154,9 @@ def _build_result_row(
 
 
 class GmailInvoiceFetcher:
-    """Searches a Gmail account for invoice/receipt emails and saves the matching bills/receipts to disk."""
+    """Searches a Gmail account for bill/receipt emails,
+      then calls ML routines to further check
+      and saves the matches to disk."""
 
     def __init__(self, creds: Credentials):
         self.service = build("gmail", "v1", credentials=creds)
@@ -211,6 +214,7 @@ class GmailInvoiceFetcher:
             resp = self.service.users().messages().list(**list_kwargs).execute()
             message_ids.extend(m["id"] for m in (resp.get("messages", []) or []))
 
+            # Gmail hands results back a page at a time — keep asking until there's no more.
             page_token = resp.get("nextPageToken")
             if not page_token:
                 break
@@ -224,6 +228,7 @@ class GmailInvoiceFetcher:
             start_date: Optional[datetime],
             end_date: Optional[datetime],
     ) -> str:
+        """Turns the date range or time window into the extra bits Gmail's search understands."""
         if start_date and end_date:
             after = start_date.strftime("%Y/%m/%d")
             before = (end_date + timedelta(days=1)).strftime("%Y/%m/%d")
@@ -260,6 +265,8 @@ class GmailInvoiceFetcher:
     def _process_message(self, message_id: str, my_email: str, downloads_dir: Path) -> List[dict]:
         full = self._load_full_message(message_id)
 
+        # If we already replied on this thread, treat it as handled and skip it.
+        # user wont reply to actual invoices/bills as they are no-reply,so this drops some candidates
         if self._user_has_replied(full["threadId"], my_email):
             return []
 
@@ -311,6 +318,7 @@ class GmailInvoiceFetcher:
             att_id = body.get("attachmentId")
             mime = part.get("mimeType") or ""
 
+            # Some emails mislabel the file type, so also check the file name just in case.
             is_pdf = (mime == "application/pdf") or filename.lower().endswith(".pdf")
             if is_pdf and att_id:
                 pdf_parts.append((filename, att_id))
@@ -373,6 +381,7 @@ class GmailInvoiceFetcher:
         out_path = make_unique_path(downloads_dir / safe)
         out_path.write_bytes(file_bytes)
 
+        # Not a bill or receipt — nothing more to do with it.
         prediction, _ = self.bill_classifier.classify_file(out_path, subject=subject)
         if prediction not in ("bill", "receipt"):
             return None
@@ -383,6 +392,7 @@ class GmailInvoiceFetcher:
         amount_currency = analysis.get("amount_currency")
         due_date_iso = analysis.get("due_date_iso")
 
+        # Fill in anything the PDF didn't have using what we found in the email text.
         if amount_value is None:
             amount_value = body_analysis.get("amount_value")
         if not amount_currency:
@@ -390,6 +400,7 @@ class GmailInvoiceFetcher:
         if not due_date_iso:
             due_date_iso = body_analysis.get("due_date_iso")
 
+        # No amount means there's nothing worth saving.
         if amount_value is None:
             return None
 
@@ -427,8 +438,7 @@ class GmailInvoiceFetcher:
             return None
         document_type = prediction.lower().strip()
 
-        logger.debug("body fallback prediction: %s", document_type)
-
+        # No amount means there's nothing worth saving.
         if body_analysis.get("amount_value") is None:
             return None
 

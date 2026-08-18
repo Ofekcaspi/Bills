@@ -1,16 +1,7 @@
 """
-Hebrew text has a recurring problem in this codebase: Gmail and pdfplumber both
-hand back Hebrew in a mangled reading order (visual/RTL order instead of logical
-order), which breaks regex matching that expects normal reading order. Different
-callers need different fixes for it, so this module gathers all of them in one
-place instead of each one reinventing its own Hebrew-detection regex.
-
-Two Hebrew-range patterns are kept, on purpose:
-- HEBREW_WORD_PATTERN matches any run of Hebrew-block characters (letters,
-  niqqud, punctuation) — a blanket "this looks like Hebrew" match.
-- HEBREW_ACRONYM_WORD_PATTERN matches Hebrew letters plus a single embedded
-  geresh/gershayim (e.g. "בע״מ"), so acronym-style words don't get split.
-They're not interchangeable — using the wrong one changes matching behavior.
+this module normalizes hebrew text,
+to make sure that txt from different sources TXT/PDF
+is uniform after this text, (instead of reverse)
 """
 from __future__ import annotations
 
